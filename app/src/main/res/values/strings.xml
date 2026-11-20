@@ -1,0 +1,34 @@
+<resources>
+    <string name="app_name">GitFiles</string>
+    <string name="connect_title">GitHub Connection</string>
+    <string name="label_github_token">GitHub Token</string>
+    <string name="hint_github_token">ghp_… or github_pat_…</string>
+    <string name="label_repo_url">Repository Link</string>
+    <string name="hint_repo_url">https://github.com/owner/repo</string>
+    <string name="label_branch_optional">Branch (optional)</string>
+    <string name="hint_branch_optional">Default branch</string>
+    <string name="action_connect">Connect</string>
+    <string name="action_disconnect">Disconnect</string>
+    <string name="action_refresh">Refresh</string>
+    <string name="action_settings">Connection</string>
+    <string name="action_upload_file">Upload File</string>
+    <string name="action_upload_folder">Upload Folder</string>
+    <string name="action_new_file">New File</string>
+    <string name="action_new_folder">New Folder</string>
+    <string name="action_replace_file">Replace File</string>
+    <string name="action_replace_folder">Replace Folder</string>
+    <string name="action_download">Download</string>
+    <string name="action_edit">Edit</string>
+    <string name="action_rename">Rename</string>
+    <string name="action_delete">Delete</string>
+    <string name="action_save">Commit</string>
+    <string name="action_cancel">Cancel</string>
+    <string name="action_confirm">Confirm</string>
+    <string name="label_commit_message">Commit message</string>
+    <string name="label_file_name">File name</string>
+    <string name="label_folder_name">Folder name</string>
+    <string name="empty_folder">Empty</string>
+    <string name="binary_file_notice">Binary file — use Download or Replace</string>
+    <string name="error_invalid_repo_url">Enter a valid GitHub repository URL or owner/repo</string>
+    <string name="error_empty_token">Enter a GitHub Personal Access Token</string>
+</resources>

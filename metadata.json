@@ -1,0 +1,6 @@
+{
+  "name": "GitFiles",
+  "description": "Simple GitHub repository file and folder manager for uploading, replacing, editing, downloading, and deleting files and folders using a GitHub token and repo URL.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
