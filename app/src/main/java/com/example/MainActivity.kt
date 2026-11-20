@@ -68,6 +68,9 @@ fun GitFilesApp(viewModel: GitFilesViewModel = viewModel()) {
         onRepoUrlChange = viewModel::onRepoUrlChanged,
         onBranchChange = viewModel::onBranchInputChanged,
         onConnect = viewModel::connect,
+        onOpenRepoPicker = viewModel::openRepoPicker,
+        onDismissRepoPicker = viewModel::dismissRepoPicker,
+        onSelectRepoFromPicker = viewModel::selectRepoFromPicker,
         onBackToBrowser = viewModel::returnToBrowserFromSettings,
         onDisconnect = viewModel::disconnect,
       )

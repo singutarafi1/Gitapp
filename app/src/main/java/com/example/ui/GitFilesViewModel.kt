@@ -11,6 +11,7 @@ import com.example.data.model.EntryType
 import com.example.data.model.FileDocument
 import com.example.data.model.RepoEntry
 import com.example.data.model.RepoSession
+import com.example.data.model.RepoSummary
 import com.example.data.model.TransferProgress
 import com.example.data.remote.GitHubRepository
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -57,6 +58,9 @@ data class GitFilesUiState(
   val pendingDownloadFileEntry: RepoEntry? = null,
   val pendingDownloadFolderEntry: RepoEntry? = null,
   val pendingFolderAction: PendingFolderAction? = null,
+  val isLoadingRepos: Boolean = false,
+  val showRepoPicker: Boolean = false,
+  val accessibleRepos: List<RepoSummary> = emptyList(),
 )
 
 class GitFilesViewModel(application: Application) : AndroidViewModel(application) {
@@ -120,6 +124,48 @@ class GitFilesViewModel(application: Application) : AndroidViewModel(application
     viewModelScope.launch {
       settingsStore.clearConnection()
       _uiState.value = GitFilesUiState()
+    }
+  }
+
+  fun openRepoPicker() {
+    val token = _uiState.value.tokenInput.trim()
+    if (token.isEmpty()) {
+      _uiState.update { it.copy(connectionError = "Enter a GitHub Personal Access Token") }
+      return
+    }
+    viewModelScope.launch {
+      _uiState.update {
+        it.copy(isLoadingRepos = true, showRepoPicker = true, connectionError = null)
+      }
+      try {
+        val repos = repository.listAccessibleRepos(token)
+        _uiState.update {
+          it.copy(isLoadingRepos = false, accessibleRepos = repos)
+        }
+      } catch (e: Exception) {
+        _uiState.update {
+          it.copy(
+            isLoadingRepos = false,
+            showRepoPicker = false,
+            connectionError = e.message ?: "Failed to load repositories",
+          )
+        }
+      }
+    }
+  }
+
+  fun dismissRepoPicker() {
+    _uiState.update { it.copy(showRepoPicker = false) }
+  }
+
+  fun selectRepoFromPicker(repo: RepoSummary) {
+    _uiState.update {
+      it.copy(
+        showRepoPicker = false,
+        repoUrlInput = repo.htmlUrl,
+        branchInput = repo.defaultBranch,
+        connectionError = null,
+      )
     }
   }
 

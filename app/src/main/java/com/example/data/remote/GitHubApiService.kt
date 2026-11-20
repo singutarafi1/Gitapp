@@ -11,6 +11,7 @@ import com.example.data.model.GitCommitDto
 import com.example.data.model.GitHubBranchDto
 import com.example.data.model.GitHubContentDto
 import com.example.data.model.GitHubRepoDto
+import com.example.data.model.GitHubUserDto
 import com.example.data.model.GitRefDto
 import com.example.data.model.GitTreeResponseDto
 import com.example.data.model.PutContentRequest
@@ -30,6 +31,20 @@ import retrofit2.http.Query
 import retrofit2.http.Streaming
 
 interface GitHubApiService {
+
+  @GET("user")
+  suspend fun getAuthenticatedUser(
+    @Header("Authorization") auth: String,
+  ): Response<GitHubUserDto>
+
+  @GET("user/repos")
+  suspend fun listUserRepos(
+    @Header("Authorization") auth: String,
+    @Query("sort") sort: String = "updated",
+    @Query("per_page") perPage: Int = 100,
+    @Query("affiliation") affiliation: String = "owner,collaborator,organization_member",
+    @Query("visibility") visibility: String = "all",
+  ): List<GitHubRepoDto>
 
   @GET("repos/{owner}/{repo}")
   suspend fun getRepository(

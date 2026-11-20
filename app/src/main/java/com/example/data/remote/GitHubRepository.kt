@@ -16,6 +16,7 @@ import com.example.data.model.GitTreeEntryDto
 import com.example.data.model.PutContentRequest
 import com.example.data.model.RepoEntry
 import com.example.data.model.RepoSession
+import com.example.data.model.RepoSummary
 import com.example.data.model.UpdateRefRequest
 import com.squareup.moshi.Moshi
 import java.nio.ByteBuffer
@@ -43,6 +44,7 @@ class GitHubRepository(private val safHelper: SafFileHelper) {
           .newBuilder()
           .header("Accept", "application/vnd.github+json")
           .header("X-GitHub-Api-Version", "2022-11-28")
+          .header("User-Agent", "GitFiles-Android")
           .build()
       chain.proceed(request)
     }
@@ -63,7 +65,15 @@ class GitHubRepository(private val safHelper: SafFileHelper) {
       .create(GitHubApiService::class.java)
   }
 
-  private fun authHeader(token: String): String = "Bearer ${token.trim()}"
+  private fun normalizeToken(raw: String): String =
+    raw.trim()
+      .removePrefix("Bearer ")
+      .removePrefix("bearer ")
+      .removePrefix("token ")
+      .removePrefix("Token ")
+      .filter { !it.isWhitespace() }
+
+  private fun authHeader(token: String): String = "Bearer ${normalizeToken(token)}"
 
   private fun encodeGitHubPath(path: String): String =
     path.split("/").filter { it.isNotEmpty() }.joinToString("/") { Uri.encode(it) }
@@ -103,21 +113,45 @@ class GitHubRepository(private val safHelper: SafFileHelper) {
     }
   }
 
+  suspend fun listAccessibleRepos(token: String): List<RepoSummary> =
+    withContext(Dispatchers.IO) {
+      val cleanToken = normalizeToken(token)
+      if (cleanToken.isEmpty()) throw IllegalArgumentException("GitHub token is required")
+      val auth = "Bearer $cleanToken"
+      val repos = safeApiCall { api.listUserRepos(auth) }
+      repos.map {
+        RepoSummary(
+          fullName = it.fullName,
+          htmlUrl = it.htmlUrl.ifEmpty { "https://github.com/${it.fullName}" },
+          defaultBranch = it.defaultBranch,
+          isPrivate = it.private,
+        )
+      }
+    }
+
   suspend fun connect(
     token: String,
     repoInput: String,
     preferredBranch: String? = null,
   ): Pair<RepoSession, String> =
     withContext(Dispatchers.IO) {
-      val cleanToken = token.trim()
+      val cleanToken = normalizeToken(token)
       if (cleanToken.isEmpty()) throw IllegalArgumentException("GitHub token is required")
 
       val coords =
         GitHubUrlParser.parse(repoInput)
           ?: throw IllegalArgumentException("Invalid GitHub repository URL or owner/repo")
 
-      val auth = authHeader(cleanToken)
-      val repoDto = safeApiCall { api.getRepository(auth, coords.owner, coords.repo) }
+      val auth = "Bearer $cleanToken"
+      val repoDto =
+        try {
+          api.getRepository(auth, coords.owner, coords.repo)
+        } catch (e: HttpException) {
+          if (e.code() == 404) {
+            throw IllegalStateException(diagnoseRepoNotFound(auth, coords.owner, coords.repo), e)
+          }
+          throw IllegalStateException(parseHttpError(e), e)
+        }
       val branchDtos = safeApiCall { api.listBranches(auth, coords.owner, coords.repo) }
       val branchNames = branchDtos.map { it.name }
       val isEmptyRepo = branchNames.isEmpty()
@@ -736,6 +770,40 @@ class GitHubRepository(private val safHelper: SafFileHelper) {
       decoder.decode(ByteBuffer.wrap(bytes)).toString()
     } catch (_: Exception) {
       null
+    }
+  }
+
+  private suspend fun diagnoseRepoNotFound(auth: String, owner: String, repo: String): String {
+    return try {
+      val userResp = api.getAuthenticatedUser(auth)
+      if (userResp.code() == 401) {
+        return "Authentication failed (401): Invalid or expired GitHub token."
+      }
+      if (!userResp.isSuccessful) {
+        return "Not found (404): Repository '$owner/$repo' not found or token lacks permission."
+      }
+      val login = userResp.body()?.login ?: "user"
+      val scopesHeader = userResp.headers()["X-OAuth-Scopes"]
+
+      // Classic PAT: X-OAuth-Scopes header is present
+      if (scopesHeader != null) {
+        val scopes = scopesHeader.split(",").map { it.trim() }.filter { it.isNotEmpty() }
+        if ("repo" !in scopes) {
+          val scopeText = if (scopes.isEmpty()) "none" else scopes.joinToString(", ")
+          return "Token (@$login) is missing 'repo' scope for private repositories (current scopes: $scopeText)."
+        }
+        return "Signed in as @$login, but '$owner/$repo' was not found or is inaccessible."
+      }
+
+      // Fine-grained PAT: verify whether the repository is included in Repository access
+      val accessible = runCatching { api.listUserRepos(auth) }.getOrNull().orEmpty()
+      val matched = accessible.any { it.fullName.equals("$owner/$repo", ignoreCase = true) }
+      if (!matched) {
+        return "Signed in as @$login, but this token cannot access '$owner/$repo'. In GitHub Fine-grained Token settings, set Repository access to 'All repositories' (or select '$repo') and enable Repository permissions -> Contents (Read and write)."
+      }
+      "Signed in as @$login, but repository '$owner/$repo' returned 404. Check Repository permissions -> Contents (Read and write)."
+    } catch (_: Exception) {
+      "Not found (404): Repository '$owner/$repo' not found or token lacks access."
     }
   }
 }

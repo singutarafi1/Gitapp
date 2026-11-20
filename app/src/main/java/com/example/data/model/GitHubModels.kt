@@ -56,11 +56,24 @@ data class TransferProgress(
 // --- GitHub REST API DTOs ---
 
 @JsonClass(generateAdapter = true)
+data class GitHubUserDto(
+  val login: String,
+)
+
+@JsonClass(generateAdapter = true)
 data class GitHubRepoDto(
   @Json(name = "full_name") val fullName: String,
   @Json(name = "default_branch") val defaultBranch: String,
+  @Json(name = "html_url") val htmlUrl: String = "",
   val private: Boolean = false,
   val size: Long = 0L,
+)
+
+data class RepoSummary(
+  val fullName: String,
+  val htmlUrl: String,
+  val defaultBranch: String,
+  val isPrivate: Boolean,
 )
 
 @JsonClass(generateAdapter = true)
