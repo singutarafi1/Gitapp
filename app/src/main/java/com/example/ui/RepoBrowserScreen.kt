@@ -55,6 +55,7 @@ import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -96,6 +97,7 @@ fun RepoBrowserScreen(
   onDeleteEntry: (RepoEntry, message: String) -> Unit,
   onExecuteFolderAction: (targetName: String, replaceExisting: Boolean, message: String) -> Unit,
   onDismissPendingFolderAction: () -> Unit,
+  onCancelTransfer: () -> Unit,
   onClearStatus: () -> Unit,
   onClearError: () -> Unit,
 ) {
@@ -180,7 +182,10 @@ fun RepoBrowserScreen(
       HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
 
       if (uiState.transferProgress != null) {
-        TransferProgressBanner(uiState.transferProgress)
+        TransferProgressBanner(
+          progress = uiState.transferProgress,
+          onCancel = onCancelTransfer,
+        )
       }
 
       if (uiState.browserError != null) {
@@ -444,7 +449,10 @@ private fun ActionStrip(
 }
 
 @Composable
-private fun TransferProgressBanner(progress: TransferProgress) {
+private fun TransferProgressBanner(
+  progress: TransferProgress,
+  onCancel: () -> Unit,
+) {
   Surface(
     color = MaterialTheme.colorScheme.surfaceVariant,
     modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
@@ -457,14 +465,27 @@ private fun TransferProgressBanner(progress: TransferProgress) {
       Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
       ) {
         Text(progress.title, style = MaterialTheme.typography.labelLarge)
-        if (progress.total > 0) {
-          Text(
-            "${progress.completed}/${progress.total}",
-            style = CodeTextStyle,
-            color = MaterialTheme.colorScheme.primary,
-          )
+        Row(
+          verticalAlignment = Alignment.CenterVertically,
+          horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+          if (progress.total > 0) {
+            Text(
+              "${progress.completed}/${progress.total}",
+              style = CodeTextStyle,
+              color = MaterialTheme.colorScheme.primary,
+            )
+          }
+          TextButton(
+            onClick = onCancel,
+            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+            modifier = Modifier.testTag("cancel_transfer_button"),
+          ) {
+            Text(stringResource(R.string.action_cancel))
+          }
         }
       }
       if (progress.total > 0) {

@@ -21,9 +21,19 @@ import com.example.data.model.UpdateRefRequest
 import com.squareup.moshi.Moshi
 import java.nio.ByteBuffer
 import java.nio.charset.CodingErrorAction
+import java.security.MessageDigest
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import okhttp3.Interceptor
 import okhttp3.OkHttpClient
@@ -436,12 +446,15 @@ class GitHubRepository(private val safHelper: SafFileHelper) {
       }
 
       val (headCommitSha, baseTreeSha, existingTreeEntries, truncated) = fetchCurrentTree(auth, activeSession)
+      val existingRepoBlobShas =
+        existingTreeEntries.asSequence().filter { it.type == "blob" }.map { it.sha }.toSet()
       val offset = pickedFiles.size - remainingFiles.size
       val uploadEntries =
         buildTreeEntriesForFiles(
           auth = auth,
           session = activeSession,
           files = remainingFiles.map { joinPath(targetDirPath, it.name) to it.uri },
+          existingRepoBlobShas = existingRepoBlobShas,
           totalCount = pickedFiles.size,
           progressOffset = offset,
           onProgress = onProgress,
@@ -521,11 +534,14 @@ class GitHubRepository(private val safHelper: SafFileHelper) {
       }
 
       val offset = localFiles.size - remainingFiles.size
+      val existingRepoBlobShas =
+        existingTreeEntries.asSequence().filter { it.type == "blob" }.map { it.sha }.toSet()
       val uploadedEntries =
         buildTreeEntriesForFiles(
           auth = auth,
           session = activeSession,
           files = remainingFiles.map { joinPath(cleanTarget, it.relativePath) to it.uri },
+          existingRepoBlobShas = existingRepoBlobShas,
           totalCount = localFiles.size,
           progressOffset = offset,
           onProgress = onProgress,
@@ -576,56 +592,114 @@ class GitHubRepository(private val safHelper: SafFileHelper) {
     auth: String,
     session: RepoSession,
     files: List<Pair<String, Uri>>,
+    existingRepoBlobShas: Set<String>,
     totalCount: Int,
     progressOffset: Int,
     onProgress: (completed: Int, total: Int, currentName: String) -> Unit,
-  ): List<CreateTreeEntryRequest> {
-    val entries = ArrayList<CreateTreeEntryRequest>(files.size)
-    var inlineBytesUsed = 0L
+  ): List<CreateTreeEntryRequest> = coroutineScope {
+    val fileReadSemaphore = Semaphore(8)
+    val blobUploadSemaphore = Semaphore(6)
+    val completedCount = AtomicInteger(progressOffset)
+    val inlineBytesUsed = AtomicLong(0L)
     val maxInlineFileBytes = 64_000
     val maxInlineTotalBytes = 2_500_000L
+    val maxSingleBlobBytes = 50_000_000
+    val inFlightBlobs = ConcurrentHashMap<String, CompletableDeferred<String>>()
 
-    files.forEachIndexed { index, (remotePath, uri) ->
-      val currentNumber = progressOffset + index
-      val displayName = remotePath.substringAfterLast('/')
-      onProgress(currentNumber, totalCount, remotePath)
+    files
+      .map { (remotePath, uri) ->
+        async(Dispatchers.IO) {
+          val entry =
+            fileReadSemaphore.withPermit {
+              val bytes = safHelper.readBytes(uri)
+              if (bytes.size > maxSingleBlobBytes) {
+                throw IllegalArgumentException("'$remotePath' exceeds 50 MB upload limit")
+              }
 
-      val bytes = safHelper.readBytes(uri)
-      val inlineText =
-        if (
-          bytes.size <= maxInlineFileBytes &&
-            inlineBytesUsed + bytes.size <= maxInlineTotalBytes &&
-            !isKnownBinaryExtension(displayName)
-        ) {
-          tryDecodeUtf8(bytes)
-        } else {
-          null
+              val gitSha = computeGitBlobSha1(bytes)
+              if (gitSha in existingRepoBlobShas) {
+                return@withPermit CreateTreeEntryRequest(
+                  path = remotePath,
+                  mode = "100644",
+                  type = "blob",
+                  sha = gitSha,
+                )
+              }
+
+              val displayName = remotePath.substringAfterLast('/')
+              val inlineText =
+                if (
+                  bytes.size <= maxInlineFileBytes &&
+                    !isKnownBinaryExtension(displayName)
+                ) {
+                  val decoded = tryDecodeUtf8(bytes)
+                  if (decoded != null) {
+                    val prev = inlineBytesUsed.get()
+                    if (prev + bytes.size <= maxInlineTotalBytes &&
+                      inlineBytesUsed.compareAndSet(prev, prev + bytes.size)
+                    ) {
+                      decoded
+                    } else {
+                      null
+                    }
+                  } else {
+                    null
+                  }
+                } else {
+                  null
+                }
+
+              if (inlineText != null) {
+                return@withPermit CreateTreeEntryRequest(
+                  path = remotePath,
+                  mode = "100644",
+                  type = "blob",
+                  content = inlineText,
+                )
+              }
+
+              val newDeferred = CompletableDeferred<String>()
+              val existingDeferred = inFlightBlobs.putIfAbsent(gitSha, newDeferred)
+              val uploadedSha =
+                if (existingDeferred != null) {
+                  existingDeferred.await()
+                } else {
+                  try {
+                    val sha =
+                      blobUploadSemaphore.withPermit {
+                        createBlob(auth, session, bytes)
+                      }
+                    newDeferred.complete(sha)
+                    sha
+                  } catch (t: Throwable) {
+                    inFlightBlobs.remove(gitSha, newDeferred)
+                    newDeferred.completeExceptionally(t)
+                    throw t
+                  }
+                }
+
+              CreateTreeEntryRequest(
+                path = remotePath,
+                mode = "100644",
+                type = "blob",
+                sha = uploadedSha,
+              )
+            }
+
+          val done = completedCount.incrementAndGet()
+          onProgress(done, totalCount, remotePath)
+          entry
         }
-
-      if (inlineText != null) {
-        inlineBytesUsed += bytes.size
-        entries.add(
-          CreateTreeEntryRequest(
-            path = remotePath,
-            mode = "100644",
-            type = "blob",
-            content = inlineText,
-          )
-        )
-      } else {
-        val blobSha = createBlob(auth, session, bytes)
-        entries.add(
-          CreateTreeEntryRequest(
-            path = remotePath,
-            mode = "100644",
-            type = "blob",
-            sha = blobSha,
-          )
-        )
       }
-      onProgress(currentNumber + 1, totalCount, remotePath)
-    }
-    return entries
+      .awaitAll()
+  }
+
+  private fun computeGitBlobSha1(bytes: ByteArray): String {
+    val header = "blob ${bytes.size}\u0000".toByteArray(Charsets.US_ASCII)
+    val digest = MessageDigest.getInstance("SHA-1")
+    digest.update(header)
+    digest.update(bytes)
+    return digest.digest().joinToString("") { "%02x".format(it) }
   }
 
   suspend fun renameEntry(

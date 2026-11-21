@@ -109,6 +109,7 @@ fun GitFilesApp(viewModel: GitFilesViewModel = viewModel()) {
         onDeleteEntry = viewModel::deleteEntry,
         onExecuteFolderAction = viewModel::executeFolderAction,
         onDismissPendingFolderAction = viewModel::dismissPendingFolderAction,
+        onCancelTransfer = viewModel::cancelTransfer,
         onClearStatus = viewModel::clearStatusMessage,
         onClearError = viewModel::clearBrowserError,
       )

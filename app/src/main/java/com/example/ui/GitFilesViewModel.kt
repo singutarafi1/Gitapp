@@ -14,6 +14,8 @@ import com.example.data.model.RepoSession
 import com.example.data.model.RepoSummary
 import com.example.data.model.TransferProgress
 import com.example.data.remote.GitHubRepository
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -71,6 +73,19 @@ class GitFilesViewModel(application: Application) : AndroidViewModel(application
 
   private val _uiState = MutableStateFlow(GitFilesUiState())
   val uiState: StateFlow<GitFilesUiState> = _uiState.asStateFlow()
+
+  private var activeTransferJob: Job? = null
+
+  fun cancelTransfer() {
+    activeTransferJob?.cancel()
+    activeTransferJob = null
+    _uiState.update {
+      it.copy(
+        transferProgress = null,
+        statusMessage = "Cancelled",
+      )
+    }
+  }
 
   init {
     viewModelScope.launch {
@@ -456,49 +471,54 @@ class GitFilesViewModel(application: Application) : AndroidViewModel(application
     val state = _uiState.value
     val session = state.session ?: return
 
-    viewModelScope.launch {
-      _uiState.update {
-        it.copy(
-          transferProgress = TransferProgress("Uploading files", "", 0, uris.size),
-          browserError = null,
-        )
-      }
-      try {
-        val picked = uris.map { safHelper.readPickedFile(it) }
-        val updatedSession =
-          repository.uploadFiles(
-            session = session,
-            targetDirPath = state.currentPath,
-            pickedFiles = picked,
-            existingEntriesInDir = state.entries,
-            commitMessage =
-              if (picked.size == 1) "Upload ${picked.first().name}" else "Upload ${picked.size} files",
-          ) { completed, total, currentName ->
-            _uiState.update {
-              it.copy(
-                transferProgress = TransferProgress("Uploading files", currentName, completed, total)
-              )
+    activeTransferJob?.cancel()
+    activeTransferJob =
+      viewModelScope.launch {
+        _uiState.update {
+          it.copy(
+            transferProgress = TransferProgress("Uploading files", "", 0, uris.size),
+            browserError = null,
+          )
+        }
+        try {
+          val picked = uris.map { safHelper.readPickedFile(it) }
+          val updatedSession =
+            repository.uploadFiles(
+              session = session,
+              targetDirPath = state.currentPath,
+              pickedFiles = picked,
+              existingEntriesInDir = state.entries,
+              commitMessage =
+                if (picked.size == 1) "Upload ${picked.first().name}" else "Upload ${picked.size} files",
+            ) { completed, total, currentName ->
+              _uiState.update {
+                it.copy(
+                  transferProgress = TransferProgress("Uploading files", currentName, completed, total)
+                )
+              }
             }
+          val entries = repository.listDirectory(updatedSession, state.currentPath)
+          _uiState.update {
+            it.copy(
+              session = updatedSession,
+              entries = entries,
+              transferProgress = null,
+              statusMessage =
+                if (picked.size == 1) "Uploaded ${picked.first().name}" else "Uploaded ${picked.size} files",
+            )
           }
-        val entries = repository.listDirectory(updatedSession, state.currentPath)
-        _uiState.update {
-          it.copy(
-            session = updatedSession,
-            entries = entries,
-            transferProgress = null,
-            statusMessage =
-              if (picked.size == 1) "Uploaded ${picked.first().name}" else "Uploaded ${picked.size} files",
-          )
-        }
-      } catch (e: Exception) {
-        _uiState.update {
-          it.copy(
-            transferProgress = null,
-            browserError = e.message ?: "File upload failed",
-          )
+        } catch (e: CancellationException) {
+          _uiState.update { it.copy(transferProgress = null) }
+          throw e
+        } catch (e: Exception) {
+          _uiState.update {
+            it.copy(
+              transferProgress = null,
+              browserError = e.message ?: "File upload failed",
+            )
+          }
         }
       }
-    }
   }
 
   // --- Replace File ---
@@ -645,46 +665,51 @@ class GitFilesViewModel(application: Application) : AndroidViewModel(application
         }
 
     val title = if (replaceExisting) "Replacing folder" else "Uploading folder"
-    viewModelScope.launch {
-      _uiState.update {
-        it.copy(
-          transferProgress = TransferProgress(title, "", 0, pending.selection.files.size),
-          browserError = null,
-        )
-      }
-      try {
-        val updatedSession =
-          repository.uploadOrReplaceFolder(
-            session = session,
-            targetFolderPath = targetPath,
-            replaceExistingFolder = replaceExisting,
-            localFiles = pending.selection.files,
-            commitMessage = commitMessage,
-          ) { completed, total, currentName ->
-            _uiState.update {
-              it.copy(transferProgress = TransferProgress(title, currentName, completed, total))
+    activeTransferJob?.cancel()
+    activeTransferJob =
+      viewModelScope.launch {
+        _uiState.update {
+          it.copy(
+            transferProgress = TransferProgress(title, "", 0, pending.selection.files.size),
+            browserError = null,
+          )
+        }
+        try {
+          val updatedSession =
+            repository.uploadOrReplaceFolder(
+              session = session,
+              targetFolderPath = targetPath,
+              replaceExistingFolder = replaceExisting,
+              localFiles = pending.selection.files,
+              commitMessage = commitMessage,
+            ) { completed, total, currentName ->
+              _uiState.update {
+                it.copy(transferProgress = TransferProgress(title, currentName, completed, total))
+              }
             }
+          val entries = repository.listDirectory(updatedSession, state.currentPath)
+          _uiState.update {
+            it.copy(
+              session = updatedSession,
+              entries = entries,
+              transferProgress = null,
+              statusMessage =
+                if (replaceExisting) "Replaced folder ${targetPath.substringAfterLast('/').ifEmpty { "root" }}"
+                else "Uploaded folder ${targetPath.substringAfterLast('/').ifEmpty { "root" }}",
+            )
           }
-        val entries = repository.listDirectory(updatedSession, state.currentPath)
-        _uiState.update {
-          it.copy(
-            session = updatedSession,
-            entries = entries,
-            transferProgress = null,
-            statusMessage =
-              if (replaceExisting) "Replaced folder ${targetPath.substringAfterLast('/').ifEmpty { "root" }}"
-              else "Uploaded folder ${targetPath.substringAfterLast('/').ifEmpty { "root" }}",
-          )
-        }
-      } catch (e: Exception) {
-        _uiState.update {
-          it.copy(
-            transferProgress = null,
-            browserError = e.message ?: "Folder operation failed",
-          )
+        } catch (e: CancellationException) {
+          _uiState.update { it.copy(transferProgress = null) }
+          throw e
+        } catch (e: Exception) {
+          _uiState.update {
+            it.copy(
+              transferProgress = null,
+              browserError = e.message ?: "Folder operation failed",
+            )
+          }
         }
       }
-    }
   }
 
   // --- Download File & Folder ---
