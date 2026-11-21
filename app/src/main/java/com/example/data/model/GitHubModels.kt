@@ -180,7 +180,8 @@ data class CreateTreeEntryRequest(
   val path: String,
   val mode: String,
   val type: String,
-  val sha: String,
+  val sha: String? = null,
+  val content: String? = null,
 )
 
 @JsonClass(generateAdapter = true)
