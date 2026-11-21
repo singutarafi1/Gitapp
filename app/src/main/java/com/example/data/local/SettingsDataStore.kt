@@ -47,6 +47,13 @@ class SettingsDataStore(private val context: Context) {
     }
   }
 
+  suspend fun clearRepoSelection() {
+    context.dataStore.edit { prefs ->
+      prefs.remove(Keys.REPO_URL)
+      prefs.remove(Keys.BRANCH)
+    }
+  }
+
   suspend fun clearConnection() {
     context.dataStore.edit { prefs ->
       prefs.remove(Keys.TOKEN)

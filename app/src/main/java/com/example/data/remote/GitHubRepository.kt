@@ -4,8 +4,8 @@ import android.net.Uri
 import com.example.data.local.LocalFolderFile
 import com.example.data.local.LocalPickedFile
 import com.example.data.local.SafFileHelper
-import com.example.data.model.CreateBlobRequest
 import com.example.data.model.CreateCommitRequest
+import com.example.data.model.CreateRepoRequest
 import com.example.data.model.CreateTreeEntryRequest
 import com.example.data.model.CreateTreeRequest
 import com.example.data.model.DeleteContentRequest
@@ -17,7 +17,9 @@ import com.example.data.model.PutContentRequest
 import com.example.data.model.RepoEntry
 import com.example.data.model.RepoSession
 import com.example.data.model.RepoSummary
+import com.example.data.model.TransferProgressUpdate
 import com.example.data.model.UpdateRefRequest
+import com.example.data.model.UpdateRepoVisibilityRequest
 import com.squareup.moshi.Moshi
 import java.io.IOException
 import java.nio.ByteBuffer
@@ -67,6 +69,7 @@ class GitHubRepository(private val safHelper: SafFileHelper) {
         .connectTimeout(30, TimeUnit.SECONDS)
         .readTimeout(180, TimeUnit.SECONDS)
         .writeTimeout(180, TimeUnit.SECONDS)
+        .pingInterval(30, TimeUnit.SECONDS)
         .build()
 
     Retrofit.Builder()
@@ -109,15 +112,21 @@ class GitHubRepository(private val safHelper: SafFileHelper) {
     val code = e.code()
     val acceptedPerms = e.response()?.headers()?.get("X-Accepted-GitHub-Permissions").orEmpty()
     return when (code) {
-      401 -> "Authentication failed (401): Invalid or expired GitHub token."
+      401 ->
+        if (!apiMessage.isNullOrBlank()) "Authentication failed (401): $apiMessage"
+        else "Authentication failed (401): Invalid or expired GitHub token."
       403 -> {
         val msg = apiMessage.orEmpty()
         when {
+          acceptedPerms.contains("administration", ignoreCase = true) ||
+            msg.contains("administration", ignoreCase = true) ||
+            msg.contains("delete_repo", ignoreCase = true) ->
+            "Forbidden (403): Token needs 'Administration: Read and write' (Fine-grained PAT) or 'repo' / 'delete_repo' scope (Classic PAT) to create, modify, or delete repositories."
           acceptedPerms.contains("workflows", ignoreCase = true) ||
             msg.contains("workflow", ignoreCase = true) ->
             "Forbidden (403): Token needs 'Workflows: Read and write' (Fine-grained PAT) or 'workflow' scope (Classic PAT) to upload .github/workflows files."
           msg.contains("Resource not accessible by personal access token", ignoreCase = true) ->
-            "Forbidden (403): Resource not accessible by personal access token. Enable 'Contents: Read and write' (and 'Workflows: Read and write' if uploading .github/workflows) in your GitHub Token settings."
+            "Forbidden (403): Resource not accessible by personal access token. Enable required permissions in your GitHub Token settings (e.g. 'Contents: Read and write', or 'Administration: Read and write' for repo management)."
           msg.isNotEmpty() -> "Forbidden (403): $msg"
           else -> "Forbidden (403): Check token permissions."
         }
@@ -229,9 +238,107 @@ class GitHubRepository(private val safHelper: SafFileHelper) {
           defaultBranch = repoDto.defaultBranch,
           branches = branchNames.ifEmpty { listOf(activeBranch) },
           isEmptyRepo = isEmptyRepo,
+          isPrivate = repoDto.private,
         )
       val initialPath = coords.pathFromUrl.orEmpty()
       session to initialPath
+    }
+
+  private fun parseOwnerRepo(fullName: String): Pair<String, String> {
+    val parts = fullName.trim().trim('/').split('/').filter { it.isNotEmpty() }
+    if (parts.size == 2) return parts[0] to parts[1]
+    val coords =
+      GitHubUrlParser.parse(fullName)
+        ?: throw IllegalArgumentException("Invalid repository name: $fullName")
+    return coords.owner to coords.repo
+  }
+
+  suspend fun createRepository(
+    token: String,
+    name: String,
+    description: String,
+    isPrivate: Boolean,
+    autoInit: Boolean,
+  ): RepoSummary =
+    withContext(Dispatchers.IO) {
+      val cleanToken = normalizeToken(token)
+      if (cleanToken.isEmpty()) throw IllegalArgumentException("GitHub token is required")
+      val cleanName = name.trim()
+      if (cleanName.isEmpty()) throw IllegalArgumentException("Repository name is required")
+      val auth = "Bearer $cleanToken"
+      val dto =
+        safeApiCall {
+          api.createUserRepo(
+            auth = auth,
+            body =
+              CreateRepoRequest(
+                name = cleanName,
+                description = description.trim().takeIf { it.isNotEmpty() },
+                private = isPrivate,
+                autoInit = autoInit,
+              ),
+          )
+        }
+      RepoSummary(
+        fullName = dto.fullName,
+        htmlUrl = dto.htmlUrl.ifEmpty { "https://github.com/${dto.fullName}" },
+        defaultBranch = dto.defaultBranch.ifEmpty { "main" },
+        isPrivate = dto.private,
+      )
+    }
+
+  suspend fun updateRepositoryVisibility(
+    token: String,
+    fullName: String,
+    makePrivate: Boolean,
+  ): RepoSummary =
+    withContext(Dispatchers.IO) {
+      val cleanToken = normalizeToken(token)
+      if (cleanToken.isEmpty()) throw IllegalArgumentException("GitHub token is required")
+      val (owner, repo) = parseOwnerRepo(fullName)
+      val auth = "Bearer $cleanToken"
+      val dto =
+        safeApiCall {
+          api.updateRepositoryVisibility(
+            auth = auth,
+            owner = owner,
+            repo = repo,
+            body = UpdateRepoVisibilityRequest(private = makePrivate),
+          )
+        }
+      RepoSummary(
+        fullName = dto.fullName,
+        htmlUrl = dto.htmlUrl.ifEmpty { "https://github.com/${dto.fullName}" },
+        defaultBranch = dto.defaultBranch.ifEmpty { "main" },
+        isPrivate = dto.private,
+      )
+    }
+
+  suspend fun deleteRepository(
+    token: String,
+    fullName: String,
+  ) =
+    withContext(Dispatchers.IO) {
+      val cleanToken = normalizeToken(token)
+      if (cleanToken.isEmpty()) throw IllegalArgumentException("GitHub token is required")
+      val (owner, repo) = parseOwnerRepo(fullName)
+      val auth = "Bearer $cleanToken"
+      safeApiCall {
+        val resp = api.deleteRepository(auth = auth, owner = owner, repo = repo)
+        if (!resp.isSuccessful) {
+          val ex = HttpException(resp)
+          if (resp.code() == 403) {
+            val apiMsg = extractApiMessage(ex)
+            if (apiMsg?.contains("rate limit", ignoreCase = true) != true) {
+              throw IllegalStateException(
+                "Forbidden (403): Deleting a repository requires 'Administration: Read and write' (Fine-grained PAT) or 'delete_repo' scope (Classic PAT).",
+                ex,
+              )
+            }
+          }
+          throw ex
+        }
+      }
     }
 
   suspend fun refreshBranches(session: RepoSession): RepoSession =
@@ -367,11 +474,34 @@ class GitHubRepository(private val safHelper: SafFileHelper) {
     existingSha: String,
     localUri: Uri,
     commitMessage: String,
+    onProgress: (TransferProgressUpdate) -> Unit = {},
   ): RepoSession =
     withContext(Dispatchers.IO) {
       val bytes = safHelper.readBytes(localUri)
-      val base64 = bytes.toByteString().base64()
+      if (bytes.size > MAX_SINGLE_BLOB_BYTES) {
+        throw IllegalArgumentException("File exceeds 75 MB upload limit")
+      }
+      val tracker = TransferMetricsTracker(bytes.size.toLong())
+      val fileName = targetPath.substringAfterLast('/')
+      onProgress(tracker.snapshot(0, 1, fileName))
       val auth = authHeader(session.token)
+      val message = commitMessage.ifBlank { "Replace $fileName" }
+
+      if (!session.isEmptyRepo && bytes.size > LARGE_SINGLE_FILE_THRESHOLD_BYTES) {
+        uploadSingleFileViaGitDataApi(
+          auth = auth,
+          session = session,
+          fullPath = targetPath,
+          bytes = bytes,
+          commitMessage = message,
+          tracker = tracker,
+          onProgress = onProgress,
+        )
+        onProgress(tracker.snapshot(1, 1, fileName))
+        return@withContext session
+      }
+
+      val base64 = bytes.toByteString().base64()
       safeApiCall {
         api.putFileContent(
           auth = auth,
@@ -380,13 +510,16 @@ class GitHubRepository(private val safHelper: SafFileHelper) {
           encodedPath = encodeGitHubPath(targetPath),
           body =
             PutContentRequest(
-              message = commitMessage.ifBlank { "Replace ${targetPath.substringAfterLast('/')}" },
+              message = message,
               content = base64,
               branch = session.branch,
               sha = existingSha,
             ),
         )
       }
+      tracker.addProcessedBytes(bytes.size.toLong())
+      tracker.recordNetworkBytes(bytes.size.toLong())
+      onProgress(tracker.snapshot(1, 1, fileName))
       session
     }
 
@@ -396,18 +529,40 @@ class GitHubRepository(private val safHelper: SafFileHelper) {
     pickedFiles: List<LocalPickedFile>,
     existingEntriesInDir: List<RepoEntry>,
     commitMessage: String,
-    onProgress: (completed: Int, total: Int, currentName: String) -> Unit,
+    onProgress: (TransferProgressUpdate) -> Unit,
   ): RepoSession =
     withContext(Dispatchers.IO) {
       if (pickedFiles.isEmpty()) return@withContext session
       val auth = authHeader(session.token)
       val existingByName = existingEntriesInDir.filter { it.type == EntryType.FILE }.associateBy { it.name }
+      val totalBytes = pickedFiles.sumOf { it.size.coerceAtLeast(0L) }
+      val tracker = TransferMetricsTracker(totalBytes)
 
       if (pickedFiles.size == 1) {
         val file = pickedFiles.first()
-        onProgress(0, 1, file.name)
         val bytes = safHelper.readBytes(file.uri)
+        if (bytes.size > MAX_SINGLE_BLOB_BYTES) {
+          throw IllegalArgumentException("'${file.name}' exceeds 75 MB upload limit")
+        }
+        val fileTracker = TransferMetricsTracker(bytes.size.toLong())
+        onProgress(fileTracker.snapshot(0, 1, file.name))
         val fullPath = joinPath(targetDirPath, file.name)
+        val message = commitMessage.ifBlank { "Upload ${file.name}" }
+
+        if (!session.isEmptyRepo && bytes.size > LARGE_SINGLE_FILE_THRESHOLD_BYTES) {
+          uploadSingleFileViaGitDataApi(
+            auth = auth,
+            session = session,
+            fullPath = fullPath,
+            bytes = bytes,
+            commitMessage = message,
+            tracker = fileTracker,
+            onProgress = onProgress,
+          )
+          onProgress(fileTracker.snapshot(1, 1, file.name))
+          return@withContext session
+        }
+
         val existingSha = existingByName[file.name]?.sha
         safeApiCall {
           api.putFileContent(
@@ -417,14 +572,16 @@ class GitHubRepository(private val safHelper: SafFileHelper) {
             encodedPath = encodeGitHubPath(fullPath),
             body =
               PutContentRequest(
-                message = commitMessage.ifBlank { "Upload ${file.name}" },
+                message = message,
                 content = bytes.toByteString().base64(),
                 branch = session.branch,
                 sha = existingSha,
               ),
           )
         }
-        onProgress(1, 1, file.name)
+        fileTracker.addProcessedBytes(bytes.size.toLong())
+        fileTracker.recordNetworkBytes(bytes.size.toLong())
+        onProgress(fileTracker.snapshot(1, 1, file.name))
         return@withContext if (session.isEmptyRepo) refreshBranches(session) else session
       }
 
@@ -432,7 +589,7 @@ class GitHubRepository(private val safHelper: SafFileHelper) {
       var remainingFiles = pickedFiles
       if (activeSession.isEmptyRepo) {
         val firstFile = pickedFiles.first()
-        onProgress(0, pickedFiles.size, firstFile.name)
+        onProgress(tracker.snapshot(0, pickedFiles.size, firstFile.name))
         val firstBytes = safHelper.readBytes(firstFile.uri)
         safeApiCall {
           api.putFileContent(
@@ -448,12 +605,16 @@ class GitHubRepository(private val safHelper: SafFileHelper) {
               ),
           )
         }
+        tracker.addProcessedBytes(firstBytes.size.toLong())
+        tracker.recordNetworkBytes(firstBytes.size.toLong())
         activeSession = refreshBranches(activeSession)
         remainingFiles = pickedFiles.drop(1)
-        onProgress(1, pickedFiles.size, firstFile.name)
+        onProgress(tracker.snapshot(1, pickedFiles.size, firstFile.name))
         if (remainingFiles.isEmpty()) {
           return@withContext activeSession
         }
+      } else {
+        onProgress(tracker.snapshot(0, pickedFiles.size, pickedFiles.first().name))
       }
 
       val snapshot = fetchCurrentTree(auth, activeSession)
@@ -482,6 +643,7 @@ class GitHubRepository(private val safHelper: SafFileHelper) {
             existingRepoBlobShas = currentBlobShas.toSet(),
             totalCount = pickedFiles.size,
             progressOffset = offset,
+            tracker = tracker,
             onProgress = onProgress,
           )
 
@@ -493,7 +655,7 @@ class GitHubRepository(private val safHelper: SafFileHelper) {
           val statusLabel =
             if (batches.size == 1) "Committing ${pickedFiles.size} files…"
             else "Committing batch ${batchIndex + 1}/${batches.size}…"
-          onProgress(offset + batch.size, pickedFiles.size, statusLabel)
+          onProgress(tracker.snapshot(offset + batch.size, pickedFiles.size, statusLabel))
           val (newCommitSha, newTreeSha) =
             commitTreeAndMoveRef(
               auth = auth,
@@ -520,7 +682,7 @@ class GitHubRepository(private val safHelper: SafFileHelper) {
     replaceExistingFolder: Boolean,
     localFiles: List<LocalFolderFile>,
     commitMessage: String,
-    onProgress: (completed: Int, total: Int, currentName: String) -> Unit,
+    onProgress: (TransferProgressUpdate) -> Unit,
   ): RepoSession =
     withContext(Dispatchers.IO) {
       val cleanTarget = targetFolderPath.trim('/')
@@ -529,12 +691,14 @@ class GitHubRepository(private val safHelper: SafFileHelper) {
       }
 
       val auth = authHeader(session.token)
+      val totalBytes = localFiles.sumOf { it.size.coerceAtLeast(0L) }
+      val tracker = TransferMetricsTracker(totalBytes)
       var activeSession = session
       var remainingFiles = localFiles
 
       if (activeSession.isEmptyRepo) {
         val firstFile = localFiles.first()
-        onProgress(0, localFiles.size, firstFile.relativePath)
+        onProgress(tracker.snapshot(0, localFiles.size, firstFile.relativePath))
         val firstBytes = safHelper.readBytes(firstFile.uri)
         safeApiCall {
           api.putFileContent(
@@ -550,12 +714,16 @@ class GitHubRepository(private val safHelper: SafFileHelper) {
               ),
           )
         }
+        tracker.addProcessedBytes(firstBytes.size.toLong())
+        tracker.recordNetworkBytes(firstBytes.size.toLong())
         activeSession = refreshBranches(activeSession)
         remainingFiles = localFiles.drop(1)
-        onProgress(1, localFiles.size, firstFile.relativePath)
+        onProgress(tracker.snapshot(1, localFiles.size, firstFile.relativePath))
         if (remainingFiles.isEmpty()) {
           return@withContext activeSession
         }
+      } else {
+        onProgress(tracker.snapshot(0, localFiles.size, localFiles.first().relativePath))
       }
 
       val snapshot = fetchCurrentTree(auth, activeSession)
@@ -593,6 +761,7 @@ class GitHubRepository(private val safHelper: SafFileHelper) {
             existingRepoBlobShas = currentBlobShas.toSet(),
             totalCount = localFiles.size,
             progressOffset = offset,
+            tracker = tracker,
             onProgress = onProgress,
           )
 
@@ -605,9 +774,11 @@ class GitHubRepository(private val safHelper: SafFileHelper) {
         if (!isFinalBatch) {
           if (changedEntries.isNotEmpty()) {
             onProgress(
-              offset + batch.size,
-              localFiles.size,
-              "Committing batch ${batchIndex + 1}/${batches.size}…",
+              tracker.snapshot(
+                offset + batch.size,
+                localFiles.size,
+                "Committing batch ${batchIndex + 1}/${batches.size}…",
+              )
             )
             val (newCommitSha, newTreeSha) =
               commitTreeAndMoveRef(
@@ -638,10 +809,12 @@ class GitHubRepository(private val safHelper: SafFileHelper) {
 
           if (hasStaleFiles) {
             onProgress(
-              localFiles.size,
-              localFiles.size,
-              if (batches.size == 1) "Committing ${localFiles.size} files…"
-              else "Finalizing folder (${batchIndex + 1}/${batches.size})…",
+              tracker.snapshot(
+                localFiles.size,
+                localFiles.size,
+                if (batches.size == 1) "Committing ${localFiles.size} files…"
+                else "Finalizing folder (${batchIndex + 1}/${batches.size})…",
+              )
             )
             val latestSnapshot =
               if (batches.size > 1) fetchCurrentTree(auth, activeSession) else snapshot
@@ -670,10 +843,12 @@ class GitHubRepository(private val safHelper: SafFileHelper) {
             )
           } else if (changedEntries.isNotEmpty()) {
             onProgress(
-              localFiles.size,
-              localFiles.size,
-              if (batches.size == 1) "Committing ${localFiles.size} files…"
-              else "Committing batch ${batchIndex + 1}/${batches.size}…",
+              tracker.snapshot(
+                localFiles.size,
+                localFiles.size,
+                if (batches.size == 1) "Committing ${localFiles.size} files…"
+                else "Committing batch ${batchIndex + 1}/${batches.size}…",
+              )
             )
             commitTreeAndMoveRef(
               auth = auth,
@@ -703,7 +878,8 @@ class GitHubRepository(private val safHelper: SafFileHelper) {
     existingRepoBlobShas: Set<String>,
     totalCount: Int,
     progressOffset: Int,
-    onProgress: (completed: Int, total: Int, currentName: String) -> Unit,
+    tracker: TransferMetricsTracker,
+    onProgress: (TransferProgressUpdate) -> Unit,
   ): List<BuiltTreeItem> = coroutineScope {
     val fileReadSemaphore = Semaphore(8)
     val blobUploadSemaphore = Semaphore(6)
@@ -711,17 +887,20 @@ class GitHubRepository(private val safHelper: SafFileHelper) {
     val inlineBytesUsed = AtomicLong(0L)
     val maxInlineFileBytes = 64_000
     val maxInlineTotalBytes = 2_500_000L
-    val maxSingleBlobBytes = 50_000_000
     val inFlightBlobs = ConcurrentHashMap<String, CompletableDeferred<String>>()
+    val lastStreamEmitAtMs = AtomicLong(0L)
 
     files
       .map { (remotePath, uri) ->
         async(Dispatchers.IO) {
+          var fileSizeBytes = 0L
+          var streamedOwnBlob = false
           val item =
             fileReadSemaphore.withPermit {
               val bytes = safHelper.readBytes(uri)
-              if (bytes.size > maxSingleBlobBytes) {
-                throw IllegalArgumentException("'$remotePath' exceeds 50 MB upload limit")
+              fileSizeBytes = bytes.size.toLong()
+              if (bytes.size > MAX_SINGLE_BLOB_BYTES) {
+                throw IllegalArgumentException("'$remotePath' exceeds 75 MB upload limit")
               }
 
               val gitSha = computeGitBlobSha1(bytes)
@@ -777,6 +956,7 @@ class GitHubRepository(private val safHelper: SafFileHelper) {
                 }
 
               if (inlineText != null) {
+                tracker.recordNetworkBytes(fileSizeBytes)
                 return@withPermit BuiltTreeItem(
                   treeEntry =
                     CreateTreeEntryRequest(
@@ -797,9 +977,18 @@ class GitHubRepository(private val safHelper: SafFileHelper) {
                   existingDeferred.await()
                 } else {
                   try {
+                    streamedOwnBlob = true
                     val sha =
                       blobUploadSemaphore.withPermit {
-                        createBlob(auth, session, bytes)
+                        createBlob(auth, session, bytes) { delta ->
+                          tracker.addProcessedBytes(delta)
+                          if (delta > 0L) tracker.recordNetworkBytes(delta)
+                          val now = System.currentTimeMillis()
+                          val prevEmit = lastStreamEmitAtMs.get()
+                          if (now - prevEmit >= 300L && lastStreamEmitAtMs.compareAndSet(prevEmit, now)) {
+                            onProgress(tracker.snapshot(completedCount.get(), totalCount, remotePath))
+                          }
+                        }
                       }
                     newDeferred.complete(sha)
                     sha
@@ -823,8 +1012,11 @@ class GitHubRepository(private val safHelper: SafFileHelper) {
               )
             }
 
+          if (!streamedOwnBlob) {
+            tracker.addProcessedBytes(fileSizeBytes)
+          }
           val done = completedCount.incrementAndGet()
-          onProgress(done, totalCount, remotePath)
+          onProgress(tracker.snapshot(done, totalCount, remotePath))
           item
         }
       }
@@ -958,22 +1150,48 @@ class GitHubRepository(private val safHelper: SafFileHelper) {
       session
     }
 
-  suspend fun downloadFile(session: RepoSession, entry: RepoEntry, destUri: Uri) =
+  suspend fun downloadFile(
+    session: RepoSession,
+    entry: RepoEntry,
+    destUri: Uri,
+    onProgress: (TransferProgressUpdate) -> Unit = {},
+  ) =
     withContext(Dispatchers.IO) {
       val auth = authHeader(session.token)
+      val tracker = TransferMetricsTracker(entry.size.coerceAtLeast(0L))
+      onProgress(tracker.snapshot(0, 1, entry.name))
       safeApiCall {
         val resp = api.downloadRawBlob(auth, owner = session.owner, repo = session.repo, sha = entry.sha)
         if (!resp.isSuccessful) throw HttpException(resp)
         val body = resp.body() ?: throw IllegalStateException("Empty download response")
-        body.byteStream().use { input -> safHelper.copyStreamToUri(input, destUri) }
+        var copiedThisAttempt = 0L
+        var lastEmitAtMs = 0L
+        try {
+          body.byteStream().use { input ->
+            safHelper.copyStreamToUri(input, destUri) { chunk ->
+              copiedThisAttempt += chunk
+              tracker.addProcessedBytes(chunk)
+              tracker.recordNetworkBytes(chunk)
+              val now = System.currentTimeMillis()
+              if (now - lastEmitAtMs >= 300L) {
+                lastEmitAtMs = now
+                onProgress(tracker.snapshot(0, 1, entry.name))
+              }
+            }
+          }
+        } catch (t: Throwable) {
+          if (copiedThisAttempt > 0L) tracker.addProcessedBytes(-copiedThisAttempt)
+          throw t
+        }
       }
+      onProgress(tracker.snapshot(1, 1, entry.name))
     }
 
   suspend fun downloadFolder(
     session: RepoSession,
     folderEntry: RepoEntry,
     destTreeUri: Uri,
-    onProgress: (completed: Int, total: Int, currentName: String) -> Unit,
+    onProgress: (TransferProgressUpdate) -> Unit,
   ) =
     withContext(Dispatchers.IO) {
       val auth = authHeader(session.token)
@@ -990,18 +1208,37 @@ class GitHubRepository(private val safHelper: SafFileHelper) {
         throw IllegalStateException("Folder '${folderEntry.name}' has no files")
       }
 
+      val totalBytes = blobs.sumOf { (it.size ?: 0L).coerceAtLeast(0L) }
+      val tracker = TransferMetricsTracker(totalBytes)
+      var lastEmitAtMs = 0L
+
       blobs.forEachIndexed { index, blob ->
         val relPath = joinPath(folderEntry.name, blob.path.removePrefix(prefix))
-        onProgress(index, blobs.size, relPath)
+        onProgress(tracker.snapshot(index, blobs.size, relPath))
         safeApiCall {
           val resp = api.downloadRawBlob(auth, owner = session.owner, repo = session.repo, sha = blob.sha)
           if (!resp.isSuccessful) throw HttpException(resp)
           val body = resp.body() ?: throw IllegalStateException("Empty blob response")
-          body.byteStream().use { input ->
-            safHelper.writeStreamToTreeRelativePath(destTreeUri, relPath, input)
+          var copiedThisAttempt = 0L
+          try {
+            body.byteStream().use { input ->
+              safHelper.writeStreamToTreeRelativePath(destTreeUri, relPath, input) { chunk ->
+                copiedThisAttempt += chunk
+                tracker.addProcessedBytes(chunk)
+                tracker.recordNetworkBytes(chunk)
+                val now = System.currentTimeMillis()
+                if (now - lastEmitAtMs >= 300L) {
+                  lastEmitAtMs = now
+                  onProgress(tracker.snapshot(index, blobs.size, relPath))
+                }
+              }
+            }
+          } catch (t: Throwable) {
+            if (copiedThisAttempt > 0L) tracker.addProcessedBytes(-copiedThisAttempt)
+            throw t
           }
         }
-        onProgress(index + 1, blobs.size, relPath)
+        onProgress(tracker.snapshot(index + 1, blobs.size, relPath))
       }
     }
 
@@ -1028,10 +1265,68 @@ class GitHubRepository(private val safHelper: SafFileHelper) {
     )
   }
 
-  private suspend fun createBlob(auth: String, session: RepoSession, bytes: ByteArray): String {
-    val base64 = bytes.toByteString().base64()
+  private suspend fun uploadSingleFileViaGitDataApi(
+    auth: String,
+    session: RepoSession,
+    fullPath: String,
+    bytes: ByteArray,
+    commitMessage: String,
+    tracker: TransferMetricsTracker,
+    onProgress: (TransferProgressUpdate) -> Unit,
+  ) {
+    val displayName = fullPath.substringAfterLast('/')
+    val ref =
+      safeApiCall {
+        api.getBranchRef(auth, session.owner, session.repo, encodeGitHubPath(session.branch))
+      }
+    val headSha = ref.refObject.sha
+    val commit = safeApiCall { api.getCommit(auth, session.owner, session.repo, headSha) }
+
+    var lastEmitAtMs = 0L
+    val blobSha =
+      createBlob(auth, session, bytes) { delta ->
+        tracker.addProcessedBytes(delta)
+        if (delta > 0L) tracker.recordNetworkBytes(delta)
+        val now = System.currentTimeMillis()
+        if (now - lastEmitAtMs >= 250L) {
+          lastEmitAtMs = now
+          onProgress(tracker.snapshot(0, 1, displayName))
+        }
+      }
+
+    onProgress(tracker.snapshot(1, 1, "Committing $displayName…"))
+    commitTreeAndMoveRef(
+      auth = auth,
+      session = session,
+      parentCommitSha = headSha,
+      baseTreeSha = commit.tree.sha,
+      entries =
+        listOf(
+          CreateTreeEntryRequest(
+            path = fullPath,
+            mode = "100644",
+            type = "blob",
+            sha = blobSha,
+          )
+        ),
+      message = commitMessage,
+    )
+  }
+
+  private suspend fun createBlob(
+    auth: String,
+    session: RepoSession,
+    bytes: ByteArray,
+    onBytesDelta: (Long) -> Unit = {},
+  ): String {
+    val body = StreamingBlobRequestBody(bytes, onBytesDelta)
     return safeApiCall {
-      api.createBlob(auth, session.owner, session.repo, CreateBlobRequest(content = base64)).sha
+      try {
+        api.createBlob(auth, session.owner, session.repo, body).sha
+      } catch (t: Throwable) {
+        body.rollbackReportedBytes()
+        throw t
+      }
     }
   }
 
@@ -1137,7 +1432,70 @@ class GitHubRepository(private val safHelper: SafFileHelper) {
     }
   }
 
+  private class TransferMetricsTracker(val totalBytes: Long) {
+    private val processedBytes = AtomicLong(0L)
+    private val samples = ArrayDeque<Pair<Long, Long>>()
+    private var windowBytes = 0L
+
+    fun addProcessedBytes(bytes: Long) {
+      if (bytes != 0L) {
+        processedBytes.updateAndGet { current -> (current + bytes).coerceAtLeast(0L) }
+      }
+    }
+
+    fun recordNetworkBytes(bytes: Long) {
+      if (bytes <= 0L) return
+      val now = System.currentTimeMillis()
+      synchronized(samples) {
+        samples.addLast(now to bytes)
+        windowBytes += bytes
+        pruneLocked(now)
+      }
+    }
+
+    private fun pruneLocked(now: Long) {
+      val cutoff = now - 5_000L
+      while (samples.size > 1 && samples.first().first < cutoff) {
+        windowBytes -= samples.removeFirst().second
+      }
+      if (samples.isEmpty()) windowBytes = 0L
+    }
+
+    fun snapshot(completed: Int, total: Int, currentName: String): TransferProgressUpdate {
+      val now = System.currentTimeMillis()
+      val speed =
+        synchronized(samples) {
+          pruneLocked(now)
+          if (windowBytes <= 0L || samples.isEmpty() || now - samples.last().first > 8_000L) {
+            0L
+          } else {
+            val spanMs = (now - samples.first().first).coerceAtLeast(350L)
+            (windowBytes * 1000L) / spanMs
+          }
+        }
+      val effectiveTotal = totalBytes.coerceAtLeast(processedBytes.get())
+      val transferred = processedBytes.get().coerceAtMost(effectiveTotal)
+      val eta =
+        if (speed > 0L && effectiveTotal > transferred) {
+          ((effectiveTotal - transferred) / speed).coerceAtLeast(1L)
+        } else {
+          null
+        }
+      return TransferProgressUpdate(
+        completed = completed,
+        total = total,
+        currentName = currentName,
+        transferredBytes = transferred,
+        totalBytes = effectiveTotal,
+        bytesPerSecond = speed,
+        etaSeconds = eta,
+      )
+    }
+  }
+
   private companion object {
     const val UPLOAD_COMMIT_BATCH_SIZE = 50
+    const val LARGE_SINGLE_FILE_THRESHOLD_BYTES = 1_000_000
+    const val MAX_SINGLE_BLOB_BYTES = 75_000_000
   }
 }

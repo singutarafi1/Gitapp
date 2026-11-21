@@ -29,10 +29,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.example.R
 import com.example.data.model.EntryType
 import com.example.data.model.RepoEntry
+import com.example.data.model.RepoSummary
 import com.example.ui.theme.CodeTextStyle
 
 @Composable
@@ -266,9 +268,12 @@ fun FolderActionConfirmDialog(
       )
     },
     text = {
+      val totalBytes = remember(pending.selection.files) {
+        pending.selection.files.sumOf { it.size.coerceAtLeast(0L) }
+      }
       Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text(
-          text = "${pending.selection.files.size} files -> $resolvedTarget",
+          text = "${pending.selection.files.size} files (${formatBytes(totalBytes)}) -> $resolvedTarget",
           style = CodeTextStyle,
           color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -393,6 +398,191 @@ fun BranchPickerDialog(
       }
     },
     confirmButton = {
+      TextButton(onClick = onDismiss) { Text(stringResource(R.string.action_cancel)) }
+    },
+  )
+}
+
+@Composable
+fun CreateRepoDialog(
+  onDismiss: () -> Unit,
+  onConfirm: (name: String, description: String, isPrivate: Boolean, autoInit: Boolean) -> Unit,
+) {
+  var repoName by remember { mutableStateOf("") }
+  var description by remember { mutableStateOf("") }
+  var isPrivate by remember { mutableStateOf(false) }
+  var autoInit by remember { mutableStateOf(true) }
+
+  AlertDialog(
+    onDismissRequest = onDismiss,
+    title = { Text(stringResource(R.string.action_new_repo)) },
+    text = {
+      Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        OutlinedTextField(
+          value = repoName,
+          onValueChange = { repoName = it },
+          label = { Text(stringResource(R.string.label_repo_name)) },
+          placeholder = { Text("my-new-repo") },
+          singleLine = true,
+          textStyle = CodeTextStyle,
+          modifier = Modifier.fillMaxWidth().testTag("create_repo_name_input"),
+        )
+        OutlinedTextField(
+          value = description,
+          onValueChange = { description = it },
+          label = { Text(stringResource(R.string.label_description_optional)) },
+          singleLine = true,
+          modifier = Modifier.fillMaxWidth().testTag("create_repo_description_input"),
+        )
+        Row(
+          modifier = Modifier.fillMaxWidth(),
+          verticalAlignment = Alignment.CenterVertically,
+          horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+          Text(
+            text = stringResource(R.string.label_private_repo),
+            style = MaterialTheme.typography.bodyMedium,
+            modifier = Modifier.weight(1f).padding(end = 8.dp),
+          )
+          Switch(
+            checked = isPrivate,
+            onCheckedChange = { isPrivate = it },
+            modifier = Modifier.testTag("create_repo_private_switch"),
+          )
+        }
+        Row(
+          modifier = Modifier.fillMaxWidth(),
+          verticalAlignment = Alignment.CenterVertically,
+          horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+          Text(
+            text = stringResource(R.string.label_init_readme),
+            style = MaterialTheme.typography.bodyMedium,
+            modifier = Modifier.weight(1f).padding(end = 8.dp),
+          )
+          Switch(
+            checked = autoInit,
+            onCheckedChange = { autoInit = it },
+            modifier = Modifier.testTag("create_repo_init_readme_switch"),
+          )
+        }
+      }
+    },
+    confirmButton = {
+      Button(
+        onClick = { onConfirm(repoName, description, isPrivate, autoInit) },
+        enabled = repoName.trim().isNotEmpty(),
+        modifier = Modifier.testTag("confirm_create_repo_button"),
+      ) {
+        Text(stringResource(R.string.action_confirm))
+      }
+    },
+    dismissButton = {
+      TextButton(onClick = onDismiss) { Text(stringResource(R.string.action_cancel)) }
+    },
+  )
+}
+
+@Composable
+fun ToggleRepoVisibilityDialog(
+  repo: RepoSummary,
+  onDismiss: () -> Unit,
+  onConfirm: () -> Unit,
+) {
+  val makePrivate = !repo.isPrivate
+  AlertDialog(
+    onDismissRequest = onDismiss,
+    title = {
+      Text(
+        if (makePrivate) stringResource(R.string.action_make_private)
+        else stringResource(R.string.action_make_public)
+      )
+    },
+    text = {
+      Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text(
+          text = repo.fullName,
+          style = CodeTextStyle.copy(fontWeight = FontWeight.SemiBold),
+        )
+        Text(
+          text =
+            if (makePrivate) {
+              "This repository will become Private and will only be visible to you and collaborators with access."
+            } else {
+              "This repository will become Public and anyone on the internet will be able to see it."
+            },
+          style = MaterialTheme.typography.bodyMedium,
+          color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+      }
+    },
+    confirmButton = {
+      Button(
+        onClick = onConfirm,
+        modifier = Modifier.testTag("confirm_toggle_repo_visibility_button"),
+      ) {
+        Text(
+          if (makePrivate) stringResource(R.string.action_make_private)
+          else stringResource(R.string.action_make_public)
+        )
+      }
+    },
+    dismissButton = {
+      TextButton(onClick = onDismiss) { Text(stringResource(R.string.action_cancel)) }
+    },
+  )
+}
+
+@Composable
+fun DeleteRepoConfirmDialog(
+  repo: RepoSummary,
+  onDismiss: () -> Unit,
+  onConfirm: () -> Unit,
+) {
+  val shortName = repo.fullName.substringAfter('/')
+  var confirmText by remember(repo.fullName) { mutableStateOf("") }
+  val canDelete = confirmText.trim() == shortName || confirmText.trim() == repo.fullName
+
+  AlertDialog(
+    onDismissRequest = onDismiss,
+    title = { Text(stringResource(R.string.action_delete_repo)) },
+    text = {
+      Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Text(
+          text = repo.fullName,
+          style = CodeTextStyle.copy(fontWeight = FontWeight.SemiBold),
+          color = MaterialTheme.colorScheme.error,
+        )
+        Text(
+          text = "This permanently deletes the repository, branches, and all files on GitHub. This cannot be undone.",
+          style = MaterialTheme.typography.bodyMedium,
+          color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        OutlinedTextField(
+          value = confirmText,
+          onValueChange = { confirmText = it },
+          label = { Text("Type $shortName to confirm") },
+          singleLine = true,
+          textStyle = CodeTextStyle,
+          modifier = Modifier.fillMaxWidth().testTag("delete_repo_confirm_input"),
+        )
+      }
+    },
+    confirmButton = {
+      Button(
+        onClick = onConfirm,
+        enabled = canDelete,
+        colors =
+          ButtonDefaults.buttonColors(
+            containerColor = MaterialTheme.colorScheme.error,
+            contentColor = MaterialTheme.colorScheme.onError,
+          ),
+        modifier = Modifier.testTag("confirm_delete_repo_button"),
+      ) {
+        Text(stringResource(R.string.action_delete_forever))
+      }
+    },
+    dismissButton = {
       TextButton(onClick = onDismiss) { Text(stringResource(R.string.action_cancel)) }
     },
   )

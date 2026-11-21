@@ -28,32 +28,42 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.FolderCopy
 import androidx.compose.material.icons.rounded.FolderOpen
 import androidx.compose.material.icons.rounded.Key
 import androidx.compose.material.icons.rounded.Link
 import androidx.compose.material.icons.rounded.Lock
+import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.Public
 import androidx.compose.material.icons.rounded.Visibility
 import androidx.compose.material.icons.rounded.VisibilityOff
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -82,11 +92,30 @@ fun ConnectScreen(
   onOpenRepoPicker: () -> Unit,
   onDismissRepoPicker: () -> Unit,
   onSelectRepoFromPicker: (RepoSummary) -> Unit,
+  onOpenCreateRepo: () -> Unit,
+  onDismissCreateRepo: () -> Unit,
+  onCreateRepo: (name: String, description: String, isPrivate: Boolean, autoInit: Boolean) -> Unit,
+  onRequestToggleRepoVisibility: (RepoSummary) -> Unit,
+  onDismissToggleRepoVisibility: () -> Unit,
+  onConfirmToggleRepoVisibility: () -> Unit,
+  onRequestDeleteRepo: (RepoSummary) -> Unit,
+  onDismissDeleteRepo: () -> Unit,
+  onConfirmDeleteRepo: () -> Unit,
+  onClearStatus: () -> Unit,
   onBackToBrowser: () -> Unit,
   onDisconnect: () -> Unit,
 ) {
   var showToken by rememberSaveable { mutableStateOf(false) }
   val hasActiveSession = uiState.session != null
+  val snackbarHostState = remember { SnackbarHostState() }
+
+  LaunchedEffect(uiState.statusMessage) {
+    val msg = uiState.statusMessage
+    if (msg != null) {
+      snackbarHostState.showSnackbar(msg)
+      onClearStatus()
+    }
+  }
 
   if (hasActiveSession) {
     BackHandler { onBackToBrowser() }
@@ -94,6 +123,7 @@ fun ConnectScreen(
 
   Scaffold(
     contentWindowInsets = WindowInsets.safeDrawing,
+    snackbarHost = { SnackbarHost(snackbarHostState) },
     topBar = {
       if (hasActiveSession) {
         TopAppBar(
@@ -237,11 +267,11 @@ fun ConnectScreen(
 
         Button(
           onClick = onConnect,
-          enabled = !uiState.isConnecting,
+          enabled = !uiState.isConnecting && !uiState.isManagingRepo,
           modifier = Modifier.fillMaxWidth().height(50.dp).testTag("connect_button"),
           shape = RoundedCornerShape(12.dp),
         ) {
-          if (uiState.isConnecting) {
+          if (uiState.isConnecting || uiState.isManagingRepo) {
             CircularProgressIndicator(
               modifier = Modifier.size(20.dp),
               strokeWidth = 2.dp,
@@ -252,10 +282,25 @@ fun ConnectScreen(
           Text(stringResource(R.string.action_connect))
         }
 
+        OutlinedButton(
+          onClick = onOpenCreateRepo,
+          enabled = !uiState.isConnecting && !uiState.isManagingRepo,
+          modifier = Modifier.fillMaxWidth().height(48.dp).testTag("new_repo_button"),
+          shape = RoundedCornerShape(12.dp),
+        ) {
+          Icon(
+            imageVector = Icons.Rounded.Add,
+            contentDescription = null,
+            modifier = Modifier.size(18.dp),
+          )
+          Spacer(modifier = Modifier.width(8.dp))
+          Text(stringResource(R.string.action_new_repo))
+        }
+
         if (hasActiveSession) {
           OutlinedButton(
             onClick = onDisconnect,
-            enabled = !uiState.isConnecting,
+            enabled = !uiState.isConnecting && !uiState.isManagingRepo,
             modifier = Modifier.fillMaxWidth().height(48.dp).testTag("disconnect_button"),
             shape = RoundedCornerShape(12.dp),
           ) {
@@ -269,58 +314,146 @@ fun ConnectScreen(
   if (uiState.showRepoPicker) {
     AlertDialog(
       onDismissRequest = onDismissRepoPicker,
-      title = { Text("Repositories") },
-      text = {
-        when {
-          uiState.isLoadingRepos -> {
-            Box(
-              modifier = Modifier.fillMaxWidth().height(120.dp),
-              contentAlignment = Alignment.Center,
-            ) {
-              CircularProgressIndicator()
-            }
-          }
-          uiState.accessibleRepos.isEmpty() -> {
-            Text(
-              text = "No repositories accessible to this token.",
-              style = MaterialTheme.typography.bodyMedium,
-              color = MaterialTheme.colorScheme.onSurfaceVariant,
+      title = {
+        Row(
+          modifier = Modifier.fillMaxWidth(),
+          verticalAlignment = Alignment.CenterVertically,
+          horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+          Text("Repositories")
+          TextButton(
+            onClick = {
+              onDismissRepoPicker()
+              onOpenCreateRepo()
+            },
+            enabled = !uiState.isManagingRepo,
+            modifier = Modifier.testTag("picker_new_repo_button"),
+          ) {
+            Icon(
+              imageVector = Icons.Rounded.Add,
+              contentDescription = null,
+              modifier = Modifier.size(18.dp),
             )
+            Spacer(modifier = Modifier.width(4.dp))
+            Text("New")
           }
-          else -> {
-            LazyColumn(modifier = Modifier.fillMaxWidth().heightIn(max = 360.dp)) {
-              items(uiState.accessibleRepos, key = { it.fullName }) { repo ->
-                Row(
-                  modifier =
-                    Modifier.fillMaxWidth()
-                      .clickable { onSelectRepoFromPicker(repo) }
-                      .padding(horizontal = 4.dp, vertical = 12.dp),
-                  verticalAlignment = Alignment.CenterVertically,
-                  horizontalArrangement = Arrangement.spacedBy(12.dp),
-                ) {
-                  Icon(
-                    imageVector = if (repo.isPrivate) Icons.Rounded.Lock else Icons.Rounded.Public,
-                    contentDescription = if (repo.isPrivate) "Private" else "Public",
-                    tint =
-                      if (repo.isPrivate) MaterialTheme.colorScheme.primary
-                      else MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.size(18.dp),
-                  )
-                  Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                      text = repo.fullName,
-                      style = CodeTextStyle,
-                      maxLines = 1,
-                      overflow = TextOverflow.Ellipsis,
+        }
+      },
+      text = {
+        Column(modifier = Modifier.fillMaxWidth()) {
+          if (uiState.isManagingRepo) {
+            LinearProgressIndicator(modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp))
+          }
+          when {
+            uiState.isLoadingRepos -> {
+              Box(
+                modifier = Modifier.fillMaxWidth().height(120.dp),
+                contentAlignment = Alignment.Center,
+              ) {
+                CircularProgressIndicator()
+              }
+            }
+            uiState.accessibleRepos.isEmpty() -> {
+              Text(
+                text = "No repositories accessible to this token.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+              )
+            }
+            else -> {
+              LazyColumn(modifier = Modifier.fillMaxWidth().heightIn(max = 360.dp)) {
+                items(uiState.accessibleRepos, key = { it.fullName }) { repo ->
+                  var menuExpanded by remember { mutableStateOf(false) }
+                  Row(
+                    modifier =
+                      Modifier.fillMaxWidth()
+                        .clickable { onSelectRepoFromPicker(repo) }
+                        .padding(start = 4.dp, top = 8.dp, bottom = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                  ) {
+                    Icon(
+                      imageVector = if (repo.isPrivate) Icons.Rounded.Lock else Icons.Rounded.Public,
+                      contentDescription = if (repo.isPrivate) "Private" else "Public",
+                      tint =
+                        if (repo.isPrivate) MaterialTheme.colorScheme.primary
+                        else MaterialTheme.colorScheme.onSurfaceVariant,
+                      modifier = Modifier.size(18.dp),
                     )
-                    Text(
-                      text = repo.defaultBranch,
-                      style = MaterialTheme.typography.bodySmall,
-                      color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+                    Column(modifier = Modifier.weight(1f)) {
+                      Text(
+                        text = repo.fullName,
+                        style = CodeTextStyle,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                      )
+                      Text(
+                        text =
+                          "${repo.defaultBranch} • ${if (repo.isPrivate) "Private" else "Public"}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                      )
+                    }
+                    Box {
+                      IconButton(
+                        onClick = { menuExpanded = true },
+                        enabled = !uiState.isManagingRepo,
+                        modifier = Modifier.testTag("repo_picker_menu_${repo.fullName}"),
+                      ) {
+                        Icon(
+                          imageVector = Icons.Rounded.MoreVert,
+                          contentDescription = "Repository actions",
+                        )
+                      }
+                      DropdownMenu(
+                        expanded = menuExpanded,
+                        onDismissRequest = { menuExpanded = false },
+                      ) {
+                        DropdownMenuItem(
+                          text = {
+                            Text(
+                              if (repo.isPrivate) stringResource(R.string.action_make_public)
+                              else stringResource(R.string.action_make_private)
+                            )
+                          },
+                          leadingIcon = {
+                            Icon(
+                              imageVector =
+                                if (repo.isPrivate) Icons.Rounded.Public else Icons.Rounded.Lock,
+                              contentDescription = null,
+                            )
+                          },
+                          onClick = {
+                            menuExpanded = false
+                            onRequestToggleRepoVisibility(repo)
+                          },
+                        )
+                        DropdownMenuItem(
+                          text = {
+                            Text(
+                              stringResource(R.string.action_delete_repo),
+                              color = MaterialTheme.colorScheme.error,
+                            )
+                          },
+                          leadingIcon = {
+                            Icon(
+                              imageVector = Icons.Rounded.Delete,
+                              contentDescription = null,
+                              tint = MaterialTheme.colorScheme.error,
+                            )
+                          },
+                          onClick = {
+                            menuExpanded = false
+                            onRequestDeleteRepo(repo)
+                          },
+                        )
+                      }
+                    }
                   }
+                  HorizontalDivider(
+                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
+                  )
                 }
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
               }
             }
           }
@@ -331,6 +464,29 @@ fun ConnectScreen(
           Text(stringResource(R.string.action_cancel))
         }
       },
+    )
+  }
+
+  if (uiState.showCreateRepoDialog) {
+    CreateRepoDialog(
+      onDismiss = onDismissCreateRepo,
+      onConfirm = onCreateRepo,
+    )
+  }
+
+  uiState.repoVisibilityTarget?.let { target ->
+    ToggleRepoVisibilityDialog(
+      repo = target,
+      onDismiss = onDismissToggleRepoVisibility,
+      onConfirm = onConfirmToggleRepoVisibility,
+    )
+  }
+
+  uiState.repoDeleteTarget?.let { target ->
+    DeleteRepoConfirmDialog(
+      repo = target,
+      onDismiss = onDismissDeleteRepo,
+      onConfirm = onConfirmDeleteRepo,
     )
   }
 }

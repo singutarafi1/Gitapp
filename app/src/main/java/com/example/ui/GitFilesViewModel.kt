@@ -13,15 +13,20 @@ import com.example.data.model.RepoEntry
 import com.example.data.model.RepoSession
 import com.example.data.model.RepoSummary
 import com.example.data.model.TransferProgress
+import com.example.data.model.TransferProgressUpdate
 import com.example.data.remote.GitHubRepository
+import com.example.data.remote.GitHubUrlParser
 import com.example.sync.TransferForegroundService
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 enum class AppScreen {
@@ -65,6 +70,10 @@ data class GitFilesUiState(
   val showRepoPicker: Boolean = false,
   val accessibleRepos: List<RepoSummary> = emptyList(),
   val canRetryTransfer: Boolean = false,
+  val isManagingRepo: Boolean = false,
+  val showCreateRepoDialog: Boolean = false,
+  val repoVisibilityTarget: RepoSummary? = null,
+  val repoDeleteTarget: RepoSummary? = null,
 )
 
 class GitFilesViewModel(application: Application) : AndroidViewModel(application) {
@@ -99,6 +108,63 @@ class GitFilesViewModel(application: Application) : AndroidViewModel(application
     lastFailedTransferRetry = null
     _uiState.update { it.copy(canRetryTransfer = false, browserError = null) }
     action()
+  }
+
+  private fun CoroutineScope.startElapsedTicker(startedAtMs: Long): Job =
+    launch {
+      while (isActive) {
+        delay(1000L)
+        val elapsed = System.currentTimeMillis() - startedAtMs
+        _uiState.update { state ->
+          val current = state.transferProgress ?: return@update state
+          state.copy(transferProgress = current.copy(elapsedMs = elapsed))
+        }
+      }
+    }
+
+  private fun publishTransferUpdate(
+    title: String,
+    startedAtMs: Long,
+    update: TransferProgressUpdate,
+    updateNotification: Boolean,
+  ) {
+    val elapsedMs = System.currentTimeMillis() - startedAtMs
+    if (updateNotification) {
+      val sizePart =
+        when {
+          update.totalBytes > 0L ->
+            "${formatBytes(update.transferredBytes)}/${formatBytes(update.totalBytes)}"
+          update.transferredBytes > 0L -> formatBytes(update.transferredBytes)
+          else -> ""
+        }
+      val speedPart = formatSpeed(update.bytesPerSecond)
+      val etaPart = update.etaSeconds?.let { "~${formatDuration(it)}" }.orEmpty()
+      val stats = listOf(sizePart, speedPart, etaPart).filter { it.isNotEmpty() }.joinToString(" • ")
+      TransferForegroundService.updateProgress(
+        context = appContext,
+        title = title,
+        detail = update.currentName,
+        completed = update.completed,
+        total = update.total,
+        stats = stats,
+      )
+    }
+    _uiState.update {
+      it.copy(
+        transferProgress =
+          TransferProgress(
+            title = title,
+            currentItem = update.currentName,
+            completed = update.completed,
+            total = update.total,
+            transferredBytes = update.transferredBytes,
+            totalBytes = update.totalBytes,
+            bytesPerSecond = update.bytesPerSecond,
+            elapsedMs = elapsedMs,
+            etaSeconds = update.etaSeconds,
+          )
+      )
+    }
   }
 
   init {
@@ -202,6 +268,238 @@ class GitFilesViewModel(application: Application) : AndroidViewModel(application
         branchInput = repo.defaultBranch,
         connectionError = null,
       )
+    }
+  }
+
+  private fun setScreenError(message: String) {
+    _uiState.update {
+      if (it.screen == AppScreen.CONNECT) {
+        it.copy(connectionError = message, isManagingRepo = false)
+      } else {
+        it.copy(browserError = message, isManagingRepo = false)
+      }
+    }
+  }
+
+  private fun activeTokenOrNotify(): String? {
+    val state = _uiState.value
+    val token = state.tokenInput.trim().ifEmpty { state.session?.token.orEmpty() }
+    if (token.isEmpty()) {
+      setScreenError("Enter a GitHub Personal Access Token")
+      return null
+    }
+    return token
+  }
+
+  fun openCreateRepoDialog() {
+    if (activeTokenOrNotify() == null) return
+    _uiState.update {
+      it.copy(
+        showCreateRepoDialog = true,
+        connectionError = null,
+        browserError = null,
+      )
+    }
+  }
+
+  fun dismissCreateRepoDialog() {
+    _uiState.update { it.copy(showCreateRepoDialog = false) }
+  }
+
+  fun createRepository(
+    name: String,
+    description: String,
+    isPrivate: Boolean,
+    autoInit: Boolean,
+  ) {
+    val token = activeTokenOrNotify() ?: return
+    val cleanName = name.trim()
+    if (cleanName.isEmpty()) return
+
+    viewModelScope.launch {
+      _uiState.update {
+        it.copy(
+          showCreateRepoDialog = false,
+          isManagingRepo = true,
+          connectionError = null,
+          browserError = null,
+        )
+      }
+      try {
+        val created = repository.createRepository(token, cleanName, description, isPrivate, autoInit)
+        _uiState.update { state ->
+          val updatedList =
+            (listOf(created) + state.accessibleRepos).distinctBy { it.fullName.lowercase() }
+          state.copy(
+            accessibleRepos = updatedList,
+            showRepoPicker = false,
+            repoUrlInput = created.htmlUrl,
+            branchInput = created.defaultBranch,
+            isManagingRepo = false,
+            statusMessage = "Created ${created.fullName}",
+          )
+        }
+        connect()
+      } catch (e: Exception) {
+        setScreenError(e.message ?: "Failed to create repository")
+      }
+    }
+  }
+
+  fun requestToggleRepoVisibility(repo: RepoSummary) {
+    _uiState.update { it.copy(repoVisibilityTarget = repo) }
+  }
+
+  fun requestToggleCurrentRepoVisibility() {
+    val session = _uiState.value.session ?: return
+    requestToggleRepoVisibility(
+      RepoSummary(
+        fullName = session.fullName,
+        htmlUrl = "https://github.com/${session.fullName}",
+        defaultBranch = session.defaultBranch,
+        isPrivate = session.isPrivate,
+      )
+    )
+  }
+
+  fun dismissToggleRepoVisibility() {
+    _uiState.update { it.copy(repoVisibilityTarget = null) }
+  }
+
+  fun confirmToggleRepoVisibility() {
+    val state = _uiState.value
+    val target = state.repoVisibilityTarget ?: return
+    val token = activeTokenOrNotify() ?: return
+    val makePrivate = !target.isPrivate
+
+    viewModelScope.launch {
+      _uiState.update {
+        it.copy(
+          repoVisibilityTarget = null,
+          isManagingRepo = true,
+          connectionError = null,
+          browserError = null,
+        )
+      }
+      try {
+        val updated = repository.updateRepositoryVisibility(token, target.fullName, makePrivate)
+        _uiState.update { current ->
+          val updatedList =
+            current.accessibleRepos.map { item ->
+              if (item.fullName.equals(updated.fullName, ignoreCase = true)) updated else item
+            }
+          val updatedSession =
+            current.session?.let { s ->
+              if (s.fullName.equals(updated.fullName, ignoreCase = true)) {
+                s.copy(isPrivate = updated.isPrivate)
+              } else {
+                s
+              }
+            }
+          current.copy(
+            accessibleRepos = updatedList,
+            session = updatedSession,
+            isManagingRepo = false,
+            statusMessage =
+              "${updated.fullName} is now ${if (updated.isPrivate) "Private" else "Public"}",
+          )
+        }
+      } catch (e: Exception) {
+        setScreenError(e.message ?: "Failed to update repository visibility")
+      }
+    }
+  }
+
+  fun requestDeleteRepo(repo: RepoSummary) {
+    _uiState.update { it.copy(repoDeleteTarget = repo) }
+  }
+
+  fun requestDeleteCurrentRepo() {
+    val session = _uiState.value.session ?: return
+    requestDeleteRepo(
+      RepoSummary(
+        fullName = session.fullName,
+        htmlUrl = "https://github.com/${session.fullName}",
+        defaultBranch = session.defaultBranch,
+        isPrivate = session.isPrivate,
+      )
+    )
+  }
+
+  fun dismissDeleteRepo() {
+    _uiState.update { it.copy(repoDeleteTarget = null) }
+  }
+
+  fun confirmDeleteRepo() {
+    val state = _uiState.value
+    val target = state.repoDeleteTarget ?: return
+    val token = activeTokenOrNotify() ?: return
+
+    viewModelScope.launch {
+      _uiState.update {
+        it.copy(
+          repoDeleteTarget = null,
+          isManagingRepo = true,
+          connectionError = null,
+          browserError = null,
+        )
+      }
+      try {
+        repository.deleteRepository(token, target.fullName)
+        val currentSession = _uiState.value.session
+        val deletedActiveSession =
+          currentSession?.fullName?.equals(target.fullName, ignoreCase = true) == true
+        val parsedInputFullName =
+          GitHubUrlParser.parse(_uiState.value.repoUrlInput)?.let { "${it.owner}/${it.repo}" }
+        val inputMatchesDeleted =
+          parsedInputFullName?.equals(target.fullName, ignoreCase = true) == true
+
+        if (deletedActiveSession) {
+          activeTransferJob?.cancel()
+          activeTransferJob = null
+          lastFailedTransferRetry = null
+          TransferForegroundService.stop(appContext)
+          settingsStore.clearRepoSelection()
+        } else if (inputMatchesDeleted) {
+          settingsStore.clearRepoSelection()
+        }
+
+        _uiState.update { current ->
+          val remainingRepos =
+            current.accessibleRepos.filterNot {
+              it.fullName.equals(target.fullName, ignoreCase = true)
+            }
+          if (deletedActiveSession) {
+            current.copy(
+              screen = AppScreen.CONNECT,
+              session = null,
+              repoUrlInput = "",
+              branchInput = "",
+              currentPath = "",
+              entries = emptyList(),
+              openedDocument = null,
+              editorText = "",
+              transferProgress = null,
+              canRetryTransfer = false,
+              accessibleRepos = remainingRepos,
+              isManagingRepo = false,
+              connectionError = null,
+              browserError = null,
+              statusMessage = "Deleted ${target.fullName}",
+            )
+          } else {
+            current.copy(
+              accessibleRepos = remainingRepos,
+              repoUrlInput = if (inputMatchesDeleted) "" else current.repoUrlInput,
+              branchInput = if (inputMatchesDeleted) "" else current.branchInput,
+              isManagingRepo = false,
+              statusMessage = "Deleted ${target.fullName}",
+            )
+          }
+        }
+      } catch (e: Exception) {
+        setScreenError(e.message ?: "Failed to delete repository")
+      }
     }
   }
 
@@ -505,6 +803,7 @@ class GitFilesViewModel(application: Application) : AndroidViewModel(application
     activeTransferJob =
       viewModelScope.launch {
         val title = "Uploading files"
+        val startedAtMs = System.currentTimeMillis()
         TransferForegroundService.start(appContext, title, uris.size)
         _uiState.update {
           it.copy(
@@ -513,6 +812,7 @@ class GitFilesViewModel(application: Application) : AndroidViewModel(application
             canRetryTransfer = false,
           )
         }
+        val tickerJob = startElapsedTicker(startedAtMs)
         try {
           val picked = uris.map { safHelper.readPickedFile(it) }
           val updatedSession =
@@ -523,13 +823,13 @@ class GitFilesViewModel(application: Application) : AndroidViewModel(application
               existingEntriesInDir = state.entries,
               commitMessage =
                 if (picked.size == 1) "Upload ${picked.first().name}" else "Upload ${picked.size} files",
-            ) { completed, total, currentName ->
-              TransferForegroundService.updateProgress(appContext, title, currentName, completed, total)
-              _uiState.update {
-                it.copy(
-                  transferProgress = TransferProgress(title, currentName, completed, total)
-                )
-              }
+            ) { update ->
+              publishTransferUpdate(
+                title = title,
+                startedAtMs = startedAtMs,
+                update = update,
+                updateNotification = true,
+              )
             }
           val entries = repository.listDirectory(updatedSession, state.currentPath)
           _uiState.update {
@@ -555,6 +855,7 @@ class GitFilesViewModel(application: Application) : AndroidViewModel(application
             )
           }
         } finally {
+          tickerJob.cancel()
           TransferForegroundService.stop(appContext)
         }
       }
@@ -574,12 +875,15 @@ class GitFilesViewModel(application: Application) : AndroidViewModel(application
     val state = _uiState.value
     val session = state.session ?: return
     viewModelScope.launch {
+      val title = "Replacing file"
+      val startedAtMs = System.currentTimeMillis()
       _uiState.update {
         it.copy(
-          transferProgress = TransferProgress("Replacing file", target.name, 0, 1),
+          transferProgress = TransferProgress(title, target.name, 0, 1),
           browserError = null,
         )
       }
+      val tickerJob = startElapsedTicker(startedAtMs)
       try {
         val updatedSession =
           repository.replaceFile(
@@ -588,7 +892,14 @@ class GitFilesViewModel(application: Application) : AndroidViewModel(application
             existingSha = target.sha,
             localUri = uri,
             commitMessage = "Replace ${target.name}",
-          )
+          ) { update ->
+            publishTransferUpdate(
+              title = title,
+              startedAtMs = startedAtMs,
+              update = update,
+              updateNotification = false,
+            )
+          }
         val entries = repository.listDirectory(updatedSession, state.currentPath)
         val updatedEntry = entries.firstOrNull { it.path == target.path }
         val refreshedDoc =
@@ -614,6 +925,8 @@ class GitFilesViewModel(application: Application) : AndroidViewModel(application
             browserError = e.message ?: "Failed to replace file",
           )
         }
+      } finally {
+        tickerJob.cancel()
       }
     }
   }
@@ -721,18 +1034,28 @@ class GitFilesViewModel(application: Application) : AndroidViewModel(application
     val session = _uiState.value.session ?: return
     val title = if (replaceExisting) "Replacing folder" else "Uploading folder"
     val totalFiles = selection.files.size
+    val totalBytes = selection.files.sumOf { it.size.coerceAtLeast(0L) }
     lastFailedTransferRetry = null
     activeTransferJob?.cancel()
     activeTransferJob =
       viewModelScope.launch {
+        val startedAtMs = System.currentTimeMillis()
         TransferForegroundService.start(appContext, title, totalFiles)
         _uiState.update {
           it.copy(
-            transferProgress = TransferProgress(title, "", 0, totalFiles),
+            transferProgress =
+              TransferProgress(
+                title = title,
+                currentItem = "",
+                completed = 0,
+                total = totalFiles,
+                totalBytes = totalBytes,
+              ),
             browserError = null,
             canRetryTransfer = false,
           )
         }
+        val tickerJob = startElapsedTicker(startedAtMs)
         try {
           val updatedSession =
             repository.uploadOrReplaceFolder(
@@ -741,11 +1064,13 @@ class GitFilesViewModel(application: Application) : AndroidViewModel(application
               replaceExistingFolder = replaceExisting,
               localFiles = selection.files,
               commitMessage = commitMessage,
-            ) { completed, total, currentName ->
-              TransferForegroundService.updateProgress(appContext, title, currentName, completed, total)
-              _uiState.update {
-                it.copy(transferProgress = TransferProgress(title, currentName, completed, total))
-              }
+            ) { update ->
+              publishTransferUpdate(
+                title = title,
+                startedAtMs = startedAtMs,
+                update = update,
+                updateNotification = true,
+              )
             }
           val entries = repository.listDirectory(updatedSession, listRefreshPath)
           _uiState.update {
@@ -780,6 +1105,7 @@ class GitFilesViewModel(application: Application) : AndroidViewModel(application
             )
           }
         } finally {
+          tickerJob.cancel()
           TransferForegroundService.stop(appContext)
         }
       }
@@ -798,14 +1124,31 @@ class GitFilesViewModel(application: Application) : AndroidViewModel(application
 
     val session = _uiState.value.session ?: return
     viewModelScope.launch {
+      val title = "Downloading"
+      val startedAtMs = System.currentTimeMillis()
       _uiState.update {
         it.copy(
-          transferProgress = TransferProgress("Downloading", entry.name, 0, 1),
+          transferProgress =
+            TransferProgress(
+              title = title,
+              currentItem = entry.name,
+              completed = 0,
+              total = 1,
+              totalBytes = entry.size,
+            ),
           browserError = null,
         )
       }
+      val tickerJob = startElapsedTicker(startedAtMs)
       try {
-        repository.downloadFile(session, entry, destUri)
+        repository.downloadFile(session, entry, destUri) { update ->
+          publishTransferUpdate(
+            title = title,
+            startedAtMs = startedAtMs,
+            update = update,
+            updateNotification = false,
+          )
+        }
         _uiState.update {
           it.copy(
             transferProgress = null,
@@ -819,6 +1162,8 @@ class GitFilesViewModel(application: Application) : AndroidViewModel(application
             browserError = e.message ?: "Download failed",
           )
         }
+      } finally {
+        tickerJob.cancel()
       }
     }
   }
@@ -837,6 +1182,7 @@ class GitFilesViewModel(application: Application) : AndroidViewModel(application
     activeTransferJob?.cancel()
     activeTransferJob =
       viewModelScope.launch {
+        val startedAtMs = System.currentTimeMillis()
         TransferForegroundService.start(appContext, title, 0)
         _uiState.update {
           it.copy(
@@ -844,14 +1190,15 @@ class GitFilesViewModel(application: Application) : AndroidViewModel(application
             browserError = null,
           )
         }
+        val tickerJob = startElapsedTicker(startedAtMs)
         try {
-          repository.downloadFolder(session, folderEntry, destTreeUri) { completed, total, currentName ->
-            TransferForegroundService.updateProgress(appContext, title, currentName, completed, total)
-            _uiState.update {
-              it.copy(
-                transferProgress = TransferProgress(title, currentName, completed, total)
-              )
-            }
+          repository.downloadFolder(session, folderEntry, destTreeUri) { update ->
+            publishTransferUpdate(
+              title = title,
+              startedAtMs = startedAtMs,
+              update = update,
+              updateNotification = true,
+            )
           }
           _uiState.update {
             it.copy(
@@ -870,6 +1217,7 @@ class GitFilesViewModel(application: Application) : AndroidViewModel(application
             )
           }
         } finally {
+          tickerJob.cancel()
           TransferForegroundService.stop(appContext)
         }
       }

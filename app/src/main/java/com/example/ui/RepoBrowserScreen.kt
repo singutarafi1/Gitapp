@@ -26,6 +26,7 @@ import androidx.compose.material.icons.automirrored.rounded.DriveFileMove
 import androidx.compose.material.icons.automirrored.rounded.InsertDriveFile
 import androidx.compose.material.icons.automirrored.rounded.NoteAdd
 import androidx.compose.material.icons.rounded.AccountTree
+import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.CreateNewFolder
 import androidx.compose.material.icons.rounded.Delete
@@ -34,7 +35,9 @@ import androidx.compose.material.icons.rounded.DriveFileRenameOutline
 import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.Folder
 import androidx.compose.material.icons.rounded.FolderOpen
+import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.MoreVert
+import androidx.compose.material.icons.rounded.Public
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.SwapHoriz
@@ -99,6 +102,15 @@ fun RepoBrowserScreen(
   onDismissPendingFolderAction: () -> Unit,
   onCancelTransfer: () -> Unit,
   onRetryTransfer: () -> Unit,
+  onOpenCreateRepo: () -> Unit,
+  onDismissCreateRepo: () -> Unit,
+  onCreateRepo: (name: String, description: String, isPrivate: Boolean, autoInit: Boolean) -> Unit,
+  onRequestToggleCurrentRepoVisibility: () -> Unit,
+  onDismissToggleRepoVisibility: () -> Unit,
+  onConfirmToggleRepoVisibility: () -> Unit,
+  onRequestDeleteCurrentRepo: () -> Unit,
+  onDismissDeleteRepo: () -> Unit,
+  onConfirmDeleteRepo: () -> Unit,
   onClearStatus: () -> Unit,
   onClearError: () -> Unit,
 ) {
@@ -108,6 +120,7 @@ fun RepoBrowserScreen(
   var showNewFileDialog by remember { mutableStateOf(false) }
   var showNewFolderDialog by remember { mutableStateOf(false) }
   var showBranchDialog by remember { mutableStateOf(false) }
+  var showRepoActionsMenu by remember { mutableStateOf(false) }
   var renameTarget by remember { mutableStateOf<RepoEntry?>(null) }
   var deleteTarget by remember { mutableStateOf<RepoEntry?>(null) }
 
@@ -121,7 +134,7 @@ fun RepoBrowserScreen(
     }
   }
 
-  val isBusy = uiState.transferProgress != null
+  val isBusy = uiState.transferProgress != null || uiState.isManagingRepo
 
   Scaffold(
     contentWindowInsets = WindowInsets.safeDrawing,
@@ -137,7 +150,7 @@ fun RepoBrowserScreen(
               overflow = TextOverflow.Ellipsis,
             )
             Text(
-              text = session.branch,
+              text = "${session.branch} • ${if (session.isPrivate) "Private" else "Public"}",
               style = CodeTextStyle,
               color = MaterialTheme.colorScheme.primary,
               maxLines = 1,
@@ -149,17 +162,80 @@ fun RepoBrowserScreen(
         actions = {
           IconButton(
             onClick = onRefresh,
-            enabled = !isBusy && !uiState.isLoadingEntries,
+            enabled = !isBusy && !uiState.isLoadingEntries && !uiState.isManagingRepo,
             modifier = Modifier.testTag("refresh_button"),
           ) {
             Icon(Icons.Rounded.Refresh, contentDescription = stringResource(R.string.action_refresh))
           }
           IconButton(
             onClick = onOpenSettings,
-            enabled = !isBusy,
+            enabled = !isBusy && !uiState.isManagingRepo,
             modifier = Modifier.testTag("settings_button"),
           ) {
             Icon(Icons.Rounded.Settings, contentDescription = stringResource(R.string.action_settings))
+          }
+          Box {
+            IconButton(
+              onClick = { showRepoActionsMenu = true },
+              enabled = !isBusy && !uiState.isManagingRepo,
+              modifier = Modifier.testTag("repo_actions_menu_button"),
+            ) {
+              Icon(Icons.Rounded.MoreVert, contentDescription = "Repository actions")
+            }
+            DropdownMenu(
+              expanded = showRepoActionsMenu,
+              onDismissRequest = { showRepoActionsMenu = false },
+            ) {
+              DropdownMenuItem(
+                text = {
+                  Text(
+                    if (session.isPrivate) stringResource(R.string.action_make_public)
+                    else stringResource(R.string.action_make_private)
+                  )
+                },
+                leadingIcon = {
+                  Icon(
+                    imageVector =
+                      if (session.isPrivate) Icons.Rounded.Public else Icons.Rounded.Lock,
+                    contentDescription = null,
+                  )
+                },
+                onClick = {
+                  showRepoActionsMenu = false
+                  onRequestToggleCurrentRepoVisibility()
+                },
+                modifier = Modifier.testTag("menu_toggle_repo_visibility"),
+              )
+              DropdownMenuItem(
+                text = { Text(stringResource(R.string.action_new_repo)) },
+                leadingIcon = { Icon(Icons.Rounded.Add, contentDescription = null) },
+                onClick = {
+                  showRepoActionsMenu = false
+                  onOpenCreateRepo()
+                },
+                modifier = Modifier.testTag("menu_new_repo"),
+              )
+              DropdownMenuItem(
+                text = {
+                  Text(
+                    stringResource(R.string.action_delete_repo),
+                    color = MaterialTheme.colorScheme.error,
+                  )
+                },
+                leadingIcon = {
+                  Icon(
+                    imageVector = Icons.Rounded.Delete,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.error,
+                  )
+                },
+                onClick = {
+                  showRepoActionsMenu = false
+                  onRequestDeleteCurrentRepo()
+                },
+                modifier = Modifier.testTag("menu_delete_repo"),
+              )
+            }
           }
         },
       )
@@ -181,6 +257,10 @@ fun RepoBrowserScreen(
       )
 
       HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+
+      if (uiState.isManagingRepo) {
+        LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+      }
 
       if (uiState.transferProgress != null) {
         TransferProgressBanner(
@@ -357,6 +437,29 @@ fun RepoBrowserScreen(
       },
     )
   }
+
+  if (uiState.showCreateRepoDialog) {
+    CreateRepoDialog(
+      onDismiss = onDismissCreateRepo,
+      onConfirm = onCreateRepo,
+    )
+  }
+
+  uiState.repoVisibilityTarget?.let { target ->
+    ToggleRepoVisibilityDialog(
+      repo = target,
+      onDismiss = onDismissToggleRepoVisibility,
+      onConfirm = onConfirmToggleRepoVisibility,
+    )
+  }
+
+  uiState.repoDeleteTarget?.let { target ->
+    DeleteRepoConfirmDialog(
+      repo = target,
+      onDismiss = onDismissDeleteRepo,
+      onConfirm = onConfirmDeleteRepo,
+    )
+  }
 }
 
 @Composable
@@ -467,6 +570,22 @@ private fun TransferProgressBanner(
   progress: TransferProgress,
   onCancel: () -> Unit,
 ) {
+  val sizeText =
+    when {
+      progress.totalBytes > 0L ->
+        "${formatBytes(progress.transferredBytes)} / ${formatBytes(progress.totalBytes)}"
+      progress.transferredBytes > 0L -> formatBytes(progress.transferredBytes)
+      else -> ""
+    }
+  val speedText = formatSpeed(progress.bytesPerSecond)
+  val elapsedText = formatDuration(progress.elapsedMs / 1000L)
+  val etaText = progress.etaSeconds?.let { "~${formatDuration(it)} left" }.orEmpty()
+  val rightMetrics =
+    buildList {
+      if (speedText.isNotEmpty()) add(speedText)
+      add(if (etaText.isNotEmpty()) "$elapsedText ($etaText)" else elapsedText)
+    }.joinToString(" • ")
+
   Surface(
     color = MaterialTheme.colorScheme.surfaceVariant,
     modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
@@ -502,13 +621,40 @@ private fun TransferProgressBanner(
           }
         }
       }
-      if (progress.total > 0) {
+      if (progress.totalBytes > 0L) {
+        val fraction =
+          (progress.transferredBytes.toFloat() / progress.totalBytes.toFloat()).coerceIn(0f, 1f)
+        LinearProgressIndicator(
+          progress = { fraction },
+          modifier = Modifier.fillMaxWidth().height(6.dp),
+        )
+      } else if (progress.total > 0) {
         LinearProgressIndicator(
           progress = { (progress.completed.toFloat() / progress.total.toFloat()).coerceIn(0f, 1f) },
           modifier = Modifier.fillMaxWidth().height(6.dp),
         )
       } else {
         LinearProgressIndicator(modifier = Modifier.fillMaxWidth().height(6.dp))
+      }
+      Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+      ) {
+        Text(
+          text = sizeText,
+          style = CodeTextStyle,
+          color = MaterialTheme.colorScheme.onSurfaceVariant,
+          maxLines = 1,
+          overflow = TextOverflow.Ellipsis,
+        )
+        Text(
+          text = rightMetrics,
+          style = CodeTextStyle,
+          color = MaterialTheme.colorScheme.onSurfaceVariant,
+          maxLines = 1,
+          overflow = TextOverflow.Ellipsis,
+        )
       }
       if (progress.currentItem.isNotEmpty()) {
         Text(
@@ -637,12 +783,4 @@ private fun RepoEntryRow(
       }
     }
   }
-}
-
-fun formatBytes(bytes: Long): String {
-  if (bytes < 1024) return "$bytes B"
-  val kb = bytes / 1024.0
-  if (kb < 1024) return String.format("%.1f KB", kb)
-  val mb = kb / 1024.0
-  return String.format("%.1f MB", mb)
 }

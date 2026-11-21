@@ -4,6 +4,7 @@ import com.example.data.model.CreateBlobRequest
 import com.example.data.model.CreateBlobResponse
 import com.example.data.model.CreateCommitRequest
 import com.example.data.model.CreateCommitResponse
+import com.example.data.model.CreateRepoRequest
 import com.example.data.model.CreateTreeRequest
 import com.example.data.model.CreateTreeResponse
 import com.example.data.model.DeleteContentRequest
@@ -17,9 +18,12 @@ import com.example.data.model.GitTreeResponseDto
 import com.example.data.model.PutContentRequest
 import com.example.data.model.PutContentResponse
 import com.example.data.model.UpdateRefRequest
+import com.example.data.model.UpdateRepoVisibilityRequest
+import okhttp3.RequestBody
 import okhttp3.ResponseBody
 import retrofit2.Response
 import retrofit2.http.Body
+import retrofit2.http.DELETE
 import retrofit2.http.GET
 import retrofit2.http.HTTP
 import retrofit2.http.Header
@@ -46,12 +50,33 @@ interface GitHubApiService {
     @Query("visibility") visibility: String = "all",
   ): List<GitHubRepoDto>
 
+  @POST("user/repos")
+  suspend fun createUserRepo(
+    @Header("Authorization") auth: String,
+    @Body body: CreateRepoRequest,
+  ): GitHubRepoDto
+
   @GET("repos/{owner}/{repo}")
   suspend fun getRepository(
     @Header("Authorization") auth: String,
     @Path("owner") owner: String,
     @Path("repo") repo: String,
   ): GitHubRepoDto
+
+  @PATCH("repos/{owner}/{repo}")
+  suspend fun updateRepositoryVisibility(
+    @Header("Authorization") auth: String,
+    @Path("owner") owner: String,
+    @Path("repo") repo: String,
+    @Body body: UpdateRepoVisibilityRequest,
+  ): GitHubRepoDto
+
+  @DELETE("repos/{owner}/{repo}")
+  suspend fun deleteRepository(
+    @Header("Authorization") auth: String,
+    @Path("owner") owner: String,
+    @Path("repo") repo: String,
+  ): Response<Unit>
 
   @GET("repos/{owner}/{repo}/branches")
   suspend fun listBranches(
@@ -145,7 +170,7 @@ interface GitHubApiService {
     @Header("Authorization") auth: String,
     @Path("owner") owner: String,
     @Path("repo") repo: String,
-    @Body body: CreateBlobRequest,
+    @Body body: RequestBody,
   ): CreateBlobResponse
 
   @POST("repos/{owner}/{repo}/git/trees")

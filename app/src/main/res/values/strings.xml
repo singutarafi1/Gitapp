@@ -32,4 +32,13 @@
     <string name="binary_file_notice">Binary file — use Download or Replace</string>
     <string name="error_invalid_repo_url">Enter a valid GitHub repository URL or owner/repo</string>
     <string name="error_empty_token">Enter a GitHub Personal Access Token</string>
+    <string name="action_new_repo">New Repository</string>
+    <string name="action_make_private">Make Private</string>
+    <string name="action_make_public">Make Public</string>
+    <string name="action_delete_repo">Delete Repository</string>
+    <string name="action_delete_forever">Delete Forever</string>
+    <string name="label_repo_name">Repository name</string>
+    <string name="label_description_optional">Description (optional)</string>
+    <string name="label_private_repo">Private repository</string>
+    <string name="label_init_readme">Initialize with README</string>
 </resources>

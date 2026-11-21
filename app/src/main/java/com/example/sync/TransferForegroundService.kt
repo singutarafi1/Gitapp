@@ -49,18 +49,20 @@ class TransferForegroundService : Service() {
       ACTION_UPDATE -> {
         val title = intent.getStringExtra(EXTRA_TITLE) ?: "GitFiles"
         val detail = intent.getStringExtra(EXTRA_DETAIL).orEmpty()
+        val stats = intent.getStringExtra(EXTRA_STATS).orEmpty()
         val completed = intent.getIntExtra(EXTRA_COMPLETED, 0)
         val total = intent.getIntExtra(EXTRA_TOTAL, 0)
-        val notification = buildNotification(title, detail, completed, total)
+        val notification = buildNotification(title, detail, stats, completed, total)
         val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         nm.notify(NOTIFICATION_ID, notification)
       }
       else -> {
         val title = intent?.getStringExtra(EXTRA_TITLE) ?: "GitFiles transfer"
         val detail = intent?.getStringExtra(EXTRA_DETAIL).orEmpty()
+        val stats = intent?.getStringExtra(EXTRA_STATS).orEmpty()
         val completed = intent?.getIntExtra(EXTRA_COMPLETED, 0) ?: 0
         val total = intent?.getIntExtra(EXTRA_TOTAL, 0) ?: 0
-        val notification = buildNotification(title, detail, completed, total)
+        val notification = buildNotification(title, detail, stats, completed, total)
         val fgType =
           if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
@@ -105,6 +107,7 @@ class TransferForegroundService : Service() {
   private fun buildNotification(
     title: String,
     detail: String,
+    stats: String,
     completed: Int,
     total: Int,
   ): Notification {
@@ -132,24 +135,29 @@ class TransferForegroundService : Service() {
         PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
       )
 
+    val contentParts = buildList {
+      if (total > 0) add("$completed/$total")
+      if (stats.isNotEmpty()) add(stats)
+      if (stats.isEmpty() && detail.isNotEmpty()) add(detail)
+    }
     val contentText =
-      when {
-        total > 0 && detail.isNotEmpty() -> "$completed/$total • $detail"
-        total > 0 -> "$completed/$total"
-        detail.isNotEmpty() -> detail
-        else -> "In progress"
-      }
+      if (contentParts.isNotEmpty()) contentParts.joinToString(" • ") else "In progress"
 
-    return NotificationCompat.Builder(this, CHANNEL_ID)
-      .setSmallIcon(R.drawable.ic_sync_notification)
-      .setContentTitle(title)
-      .setContentText(contentText)
-      .setOngoing(true)
-      .setOnlyAlertOnce(true)
-      .setContentIntent(openPending)
-      .setProgress(total.coerceAtLeast(0), completed.coerceAtLeast(0), total <= 0)
-      .addAction(0, getString(R.string.action_cancel), cancelPending)
-      .build()
+    val builder =
+      NotificationCompat.Builder(this, CHANNEL_ID)
+        .setSmallIcon(R.drawable.ic_sync_notification)
+        .setContentTitle(title)
+        .setContentText(contentText)
+        .setOngoing(true)
+        .setOnlyAlertOnce(true)
+        .setContentIntent(openPending)
+        .setProgress(total.coerceAtLeast(0), completed.coerceAtLeast(0), total <= 0)
+        .addAction(0, getString(R.string.action_cancel), cancelPending)
+
+    if (stats.isNotEmpty() && detail.isNotEmpty()) {
+      builder.setSubText(detail)
+    }
+    return builder.build()
   }
 
   companion object {
@@ -161,6 +169,7 @@ class TransferForegroundService : Service() {
     private const val ACTION_CANCEL = "com.example.sync.ACTION_CANCEL"
     private const val EXTRA_TITLE = "extra_title"
     private const val EXTRA_DETAIL = "extra_detail"
+    private const val EXTRA_STATS = "extra_stats"
     private const val EXTRA_COMPLETED = "extra_completed"
     private const val EXTRA_TOTAL = "extra_total"
 
@@ -188,6 +197,7 @@ class TransferForegroundService : Service() {
       detail: String,
       completed: Int,
       total: Int,
+      stats: String = "",
     ) {
       val now = System.currentTimeMillis()
       if (completed < total && now - lastUpdateAtMs < 400L) return
@@ -198,6 +208,7 @@ class TransferForegroundService : Service() {
           action = ACTION_UPDATE
           putExtra(EXTRA_TITLE, title)
           putExtra(EXTRA_DETAIL, detail)
+          putExtra(EXTRA_STATS, stats)
           putExtra(EXTRA_COMPLETED, completed)
           putExtra(EXTRA_TOTAL, total)
         }

@@ -20,6 +20,7 @@ data class RepoSession(
   val defaultBranch: String,
   val branches: List<String>,
   val isEmptyRepo: Boolean,
+  val isPrivate: Boolean = false,
 )
 
 enum class EntryType {
@@ -51,6 +52,21 @@ data class TransferProgress(
   val currentItem: String,
   val completed: Int,
   val total: Int,
+  val transferredBytes: Long = 0L,
+  val totalBytes: Long = 0L,
+  val bytesPerSecond: Long = 0L,
+  val elapsedMs: Long = 0L,
+  val etaSeconds: Long? = null,
+)
+
+data class TransferProgressUpdate(
+  val completed: Int,
+  val total: Int,
+  val currentName: String,
+  val transferredBytes: Long = 0L,
+  val totalBytes: Long = 0L,
+  val bytesPerSecond: Long = 0L,
+  val etaSeconds: Long? = null,
 )
 
 // --- GitHub REST API DTOs ---
@@ -210,4 +226,17 @@ data class UpdateRefRequest(
 @JsonClass(generateAdapter = true)
 data class GitHubErrorDto(
   val message: String? = null,
+)
+
+@JsonClass(generateAdapter = true)
+data class CreateRepoRequest(
+  val name: String,
+  val description: String? = null,
+  val private: Boolean = false,
+  @Json(name = "auto_init") val autoInit: Boolean = true,
+)
+
+@JsonClass(generateAdapter = true)
+data class UpdateRepoVisibilityRequest(
+  val private: Boolean,
 )

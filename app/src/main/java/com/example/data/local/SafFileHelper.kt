@@ -117,19 +117,24 @@ class SafFileHelper(private val context: Context) {
     }
   }
 
-  suspend fun copyStreamToUri(inputStream: InputStream, destUri: Uri) =
+  suspend fun copyStreamToUri(
+    inputStream: InputStream,
+    destUri: Uri,
+    onBytesCopied: (Long) -> Unit = {},
+  ) =
     withContext(Dispatchers.IO) {
       val output =
         context.contentResolver.openOutputStream(destUri, "wt")
           ?: context.contentResolver.openOutputStream(destUri)
           ?: throw IllegalStateException("Unable to open destination file for writing")
-      output.use { out -> inputStream.copyTo(out) }
+      output.use { out -> copyWithProgress(inputStream, out, onBytesCopied) }
     }
 
   suspend fun writeStreamToTreeRelativePath(
     rootTreeUri: Uri,
     relativePath: String,
     inputStream: InputStream,
+    onBytesCopied: (Long) -> Unit = {},
   ) =
     withContext(Dispatchers.IO) {
       val segments = relativePath.split("/").filter { it.isNotBlank() }
@@ -163,8 +168,24 @@ class SafFileHelper(private val context: Context) {
         context.contentResolver.openOutputStream(targetFileUri, "wt")
           ?: context.contentResolver.openOutputStream(targetFileUri)
           ?: throw IllegalStateException("Unable to write $relativePath")
-      output.use { out -> inputStream.copyTo(out) }
+      output.use { out -> copyWithProgress(inputStream, out, onBytesCopied) }
     }
+
+  private fun copyWithProgress(
+    input: InputStream,
+    output: java.io.OutputStream,
+    onBytesCopied: (Long) -> Unit,
+  ) {
+    val buffer = ByteArray(16 * 1024)
+    while (true) {
+      val read = input.read(buffer)
+      if (read < 0) break
+      if (read > 0) {
+        output.write(buffer, 0, read)
+        onBytesCopied(read.toLong())
+      }
+    }
+  }
 
   private fun findOrCreateChildDirectory(
     treeUri: Uri,
