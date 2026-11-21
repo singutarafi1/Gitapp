@@ -1,5 +1,8 @@
 package com.example
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -7,7 +10,13 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.platform.LocalContext
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.ui.AppScreen
@@ -32,6 +41,27 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun GitFilesApp(viewModel: GitFilesViewModel = viewModel()) {
   val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+  val context = LocalContext.current
+  var askedNotificationPermission by rememberSaveable { mutableStateOf(false) }
+
+  val notificationPermissionLauncher =
+    rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { _ -> }
+
+  LaunchedEffect(uiState.screen) {
+    if (
+      uiState.screen == AppScreen.BROWSER &&
+        !askedNotificationPermission &&
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
+    ) {
+      val granted =
+        ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) ==
+          PackageManager.PERMISSION_GRANTED
+      if (!granted) {
+        askedNotificationPermission = true
+        notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+      }
+    }
+  }
 
   val uploadFilesLauncher =
     rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
@@ -110,6 +140,7 @@ fun GitFilesApp(viewModel: GitFilesViewModel = viewModel()) {
         onExecuteFolderAction = viewModel::executeFolderAction,
         onDismissPendingFolderAction = viewModel::dismissPendingFolderAction,
         onCancelTransfer = viewModel::cancelTransfer,
+        onRetryTransfer = viewModel::retryFailedTransfer,
         onClearStatus = viewModel::clearStatusMessage,
         onClearError = viewModel::clearBrowserError,
       )

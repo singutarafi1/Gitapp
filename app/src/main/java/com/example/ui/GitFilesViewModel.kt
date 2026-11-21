@@ -14,6 +14,7 @@ import com.example.data.model.RepoSession
 import com.example.data.model.RepoSummary
 import com.example.data.model.TransferProgress
 import com.example.data.remote.GitHubRepository
+import com.example.sync.TransferForegroundService
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -63,6 +64,7 @@ data class GitFilesUiState(
   val isLoadingRepos: Boolean = false,
   val showRepoPicker: Boolean = false,
   val accessibleRepos: List<RepoSummary> = emptyList(),
+  val canRetryTransfer: Boolean = false,
 )
 
 class GitFilesViewModel(application: Application) : AndroidViewModel(application) {
@@ -71,23 +73,40 @@ class GitFilesViewModel(application: Application) : AndroidViewModel(application
   private val repository = GitHubRepository(safHelper)
   private val settingsStore = SettingsDataStore(application.applicationContext)
 
+  private val appContext = application.applicationContext
   private val _uiState = MutableStateFlow(GitFilesUiState())
   val uiState: StateFlow<GitFilesUiState> = _uiState.asStateFlow()
 
   private var activeTransferJob: Job? = null
+  private var lastFailedTransferRetry: (() -> Unit)? = null
 
   fun cancelTransfer() {
     activeTransferJob?.cancel()
     activeTransferJob = null
+    lastFailedTransferRetry = null
+    TransferForegroundService.stop(appContext)
     _uiState.update {
       it.copy(
         transferProgress = null,
+        canRetryTransfer = false,
         statusMessage = "Cancelled",
       )
     }
   }
 
+  fun retryFailedTransfer() {
+    val action = lastFailedTransferRetry ?: return
+    lastFailedTransferRetry = null
+    _uiState.update { it.copy(canRetryTransfer = false, browserError = null) }
+    action()
+  }
+
   init {
+    viewModelScope.launch {
+      TransferForegroundService.cancelRequests.collect {
+        cancelTransfer()
+      }
+    }
     viewModelScope.launch {
       val saved = settingsStore.savedConnection.first()
       if (saved.token.isNotBlank() || saved.repoUrl.isNotBlank()) {
@@ -122,7 +141,8 @@ class GitFilesViewModel(application: Application) : AndroidViewModel(application
   }
 
   fun clearBrowserError() {
-    _uiState.update { it.copy(browserError = null) }
+    lastFailedTransferRetry = null
+    _uiState.update { it.copy(browserError = null, canRetryTransfer = false) }
   }
 
   fun openConnectionSettings() {
@@ -137,6 +157,7 @@ class GitFilesViewModel(application: Application) : AndroidViewModel(application
 
   fun disconnect() {
     viewModelScope.launch {
+      lastFailedTransferRetry = null
       settingsStore.clearConnection()
       _uiState.value = GitFilesUiState()
     }
@@ -230,9 +251,17 @@ class GitFilesViewModel(application: Application) : AndroidViewModel(application
     val session = _uiState.value.session ?: return
     if (branchName == session.branch) return
     val updated = session.copy(branch = branchName)
+    lastFailedTransferRetry = null
     viewModelScope.launch {
       settingsStore.updateBranch(branchName)
-      _uiState.update { it.copy(session = updated, branchInput = branchName, currentPath = "") }
+      _uiState.update {
+        it.copy(
+          session = updated,
+          branchInput = branchName,
+          currentPath = "",
+          canRetryTransfer = false,
+        )
+      }
       loadDirectory("")
     }
   }
@@ -471,13 +500,17 @@ class GitFilesViewModel(application: Application) : AndroidViewModel(application
     val state = _uiState.value
     val session = state.session ?: return
 
+    lastFailedTransferRetry = null
     activeTransferJob?.cancel()
     activeTransferJob =
       viewModelScope.launch {
+        val title = "Uploading files"
+        TransferForegroundService.start(appContext, title, uris.size)
         _uiState.update {
           it.copy(
-            transferProgress = TransferProgress("Uploading files", "", 0, uris.size),
+            transferProgress = TransferProgress(title, "", 0, uris.size),
             browserError = null,
+            canRetryTransfer = false,
           )
         }
         try {
@@ -491,9 +524,10 @@ class GitFilesViewModel(application: Application) : AndroidViewModel(application
               commitMessage =
                 if (picked.size == 1) "Upload ${picked.first().name}" else "Upload ${picked.size} files",
             ) { completed, total, currentName ->
+              TransferForegroundService.updateProgress(appContext, title, currentName, completed, total)
               _uiState.update {
                 it.copy(
-                  transferProgress = TransferProgress("Uploading files", currentName, completed, total)
+                  transferProgress = TransferProgress(title, currentName, completed, total)
                 )
               }
             }
@@ -503,6 +537,7 @@ class GitFilesViewModel(application: Application) : AndroidViewModel(application
               session = updatedSession,
               entries = entries,
               transferProgress = null,
+              canRetryTransfer = false,
               statusMessage =
                 if (picked.size == 1) "Uploaded ${picked.first().name}" else "Uploaded ${picked.size} files",
             )
@@ -511,12 +546,16 @@ class GitFilesViewModel(application: Application) : AndroidViewModel(application
           _uiState.update { it.copy(transferProgress = null) }
           throw e
         } catch (e: Exception) {
+          lastFailedTransferRetry = { uploadPickedFiles(uris) }
           _uiState.update {
             it.copy(
               transferProgress = null,
+              canRetryTransfer = true,
               browserError = e.message ?: "File upload failed",
             )
           }
+        } finally {
+          TransferForegroundService.stop(appContext)
         }
       }
   }
@@ -649,7 +688,6 @@ class GitFilesViewModel(application: Application) : AndroidViewModel(application
     commitMessage: String,
   ) {
     val state = _uiState.value
-    val session = state.session ?: return
     val pending = state.pendingFolderAction ?: return
     _uiState.update { it.copy(pendingFolderAction = null) }
 
@@ -664,14 +702,35 @@ class GitFilesViewModel(application: Application) : AndroidViewModel(application
           }
         }
 
+    runFolderTransfer(
+      selection = pending.selection,
+      targetPath = targetPath,
+      listRefreshPath = state.currentPath,
+      replaceExisting = replaceExisting,
+      commitMessage = commitMessage,
+    )
+  }
+
+  private fun runFolderTransfer(
+    selection: LocalFolderSelection,
+    targetPath: String,
+    listRefreshPath: String,
+    replaceExisting: Boolean,
+    commitMessage: String,
+  ) {
+    val session = _uiState.value.session ?: return
     val title = if (replaceExisting) "Replacing folder" else "Uploading folder"
+    val totalFiles = selection.files.size
+    lastFailedTransferRetry = null
     activeTransferJob?.cancel()
     activeTransferJob =
       viewModelScope.launch {
+        TransferForegroundService.start(appContext, title, totalFiles)
         _uiState.update {
           it.copy(
-            transferProgress = TransferProgress(title, "", 0, pending.selection.files.size),
+            transferProgress = TransferProgress(title, "", 0, totalFiles),
             browserError = null,
+            canRetryTransfer = false,
           )
         }
         try {
@@ -680,19 +739,21 @@ class GitFilesViewModel(application: Application) : AndroidViewModel(application
               session = session,
               targetFolderPath = targetPath,
               replaceExistingFolder = replaceExisting,
-              localFiles = pending.selection.files,
+              localFiles = selection.files,
               commitMessage = commitMessage,
             ) { completed, total, currentName ->
+              TransferForegroundService.updateProgress(appContext, title, currentName, completed, total)
               _uiState.update {
                 it.copy(transferProgress = TransferProgress(title, currentName, completed, total))
               }
             }
-          val entries = repository.listDirectory(updatedSession, state.currentPath)
+          val entries = repository.listDirectory(updatedSession, listRefreshPath)
           _uiState.update {
             it.copy(
               session = updatedSession,
               entries = entries,
               transferProgress = null,
+              canRetryTransfer = false,
               statusMessage =
                 if (replaceExisting) "Replaced folder ${targetPath.substringAfterLast('/').ifEmpty { "root" }}"
                 else "Uploaded folder ${targetPath.substringAfterLast('/').ifEmpty { "root" }}",
@@ -702,12 +763,24 @@ class GitFilesViewModel(application: Application) : AndroidViewModel(application
           _uiState.update { it.copy(transferProgress = null) }
           throw e
         } catch (e: Exception) {
+          lastFailedTransferRetry = {
+            runFolderTransfer(
+              selection = selection,
+              targetPath = targetPath,
+              listRefreshPath = listRefreshPath,
+              replaceExisting = replaceExisting,
+              commitMessage = commitMessage,
+            )
+          }
           _uiState.update {
             it.copy(
               transferProgress = null,
+              canRetryTransfer = true,
               browserError = e.message ?: "Folder operation failed",
             )
           }
+        } finally {
+          TransferForegroundService.stop(appContext)
         }
       }
   }
@@ -760,36 +833,46 @@ class GitFilesViewModel(application: Application) : AndroidViewModel(application
     if (destTreeUri == null || folderEntry == null) return
 
     val session = _uiState.value.session ?: return
-    viewModelScope.launch {
-      _uiState.update {
-        it.copy(
-          transferProgress = TransferProgress("Downloading folder", folderEntry.name, 0, 1),
-          browserError = null,
-        )
-      }
-      try {
-        repository.downloadFolder(session, folderEntry, destTreeUri) { completed, total, currentName ->
+    val title = "Downloading folder"
+    activeTransferJob?.cancel()
+    activeTransferJob =
+      viewModelScope.launch {
+        TransferForegroundService.start(appContext, title, 0)
+        _uiState.update {
+          it.copy(
+            transferProgress = TransferProgress(title, folderEntry.name, 0, 1),
+            browserError = null,
+          )
+        }
+        try {
+          repository.downloadFolder(session, folderEntry, destTreeUri) { completed, total, currentName ->
+            TransferForegroundService.updateProgress(appContext, title, currentName, completed, total)
+            _uiState.update {
+              it.copy(
+                transferProgress = TransferProgress(title, currentName, completed, total)
+              )
+            }
+          }
           _uiState.update {
             it.copy(
-              transferProgress = TransferProgress("Downloading folder", currentName, completed, total)
+              transferProgress = null,
+              statusMessage = "Downloaded folder ${folderEntry.name}",
             )
           }
-        }
-        _uiState.update {
-          it.copy(
-            transferProgress = null,
-            statusMessage = "Downloaded folder ${folderEntry.name}",
-          )
-        }
-      } catch (e: Exception) {
-        _uiState.update {
-          it.copy(
-            transferProgress = null,
-            browserError = e.message ?: "Folder download failed",
-          )
+        } catch (e: CancellationException) {
+          _uiState.update { it.copy(transferProgress = null) }
+          throw e
+        } catch (e: Exception) {
+          _uiState.update {
+            it.copy(
+              transferProgress = null,
+              browserError = e.message ?: "Folder download failed",
+            )
+          }
+        } finally {
+          TransferForegroundService.stop(appContext)
         }
       }
-    }
   }
 
   // --- Rename & Delete ---

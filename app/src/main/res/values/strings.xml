@@ -23,6 +23,7 @@
     <string name="action_delete">Delete</string>
     <string name="action_save">Commit</string>
     <string name="action_cancel">Cancel</string>
+    <string name="action_retry">Retry</string>
     <string name="action_confirm">Confirm</string>
     <string name="label_commit_message">Commit message</string>
     <string name="label_file_name">File name</string>

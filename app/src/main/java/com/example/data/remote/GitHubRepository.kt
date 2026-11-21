@@ -19,6 +19,7 @@ import com.example.data.model.RepoSession
 import com.example.data.model.RepoSummary
 import com.example.data.model.UpdateRefRequest
 import com.squareup.moshi.Moshi
+import java.io.IOException
 import java.nio.ByteBuffer
 import java.nio.charset.CodingErrorAction
 import java.security.MessageDigest
@@ -149,6 +150,13 @@ class GitHubRepository(private val safHelper: SafFileHelper) {
           continue
         }
         throw IllegalStateException(parseHttpError(e, apiMessage), e)
+      } catch (e: IOException) {
+        if (attempt < maxAttempts - 1) {
+          delay(((attempt + 1) * 2L) * 1000L)
+          attempt++
+          continue
+        }
+        throw e
       }
     }
   }
@@ -443,44 +451,66 @@ class GitHubRepository(private val safHelper: SafFileHelper) {
         activeSession = refreshBranches(activeSession)
         remainingFiles = pickedFiles.drop(1)
         onProgress(1, pickedFiles.size, firstFile.name)
+        if (remainingFiles.isEmpty()) {
+          return@withContext activeSession
+        }
       }
 
-      val (headCommitSha, baseTreeSha, existingTreeEntries, truncated) = fetchCurrentTree(auth, activeSession)
-      val existingRepoBlobShas =
-        existingTreeEntries.asSequence().filter { it.type == "blob" }.map { it.sha }.toSet()
-      val offset = pickedFiles.size - remainingFiles.size
-      val uploadEntries =
-        buildTreeEntriesForFiles(
-          auth = auth,
-          session = activeSession,
-          files = remainingFiles.map { joinPath(targetDirPath, it.name) to it.uri },
-          existingRepoBlobShas = existingRepoBlobShas,
-          totalCount = pickedFiles.size,
-          progressOffset = offset,
-          onProgress = onProgress,
-        )
+      val snapshot = fetchCurrentTree(auth, activeSession)
+      var currentHeadCommitSha = snapshot.headCommitSha
+      var currentBaseTreeSha = snapshot.baseTreeSha
+      val currentPathToSha =
+        snapshot.entries
+          .asSequence()
+          .filter { it.type == "blob" }
+          .associate { it.path to it.sha }
+          .toMutableMap()
+      val currentBlobShas = currentPathToSha.values.toMutableSet()
 
-      val uploadPathSet = uploadEntries.map { it.path }.toSet()
-      val newTreeEntries =
-        if (!truncated) {
-          val kept =
-            existingTreeEntries
-              .filter { it.type != "tree" && it.path !in uploadPathSet }
-              .map { CreateTreeEntryRequest(it.path, it.mode, it.type, it.sha) }
-          kept + uploadEntries
-        } else {
-          uploadEntries
+      val baseOffset = pickedFiles.size - remainingFiles.size
+      val batches = remainingFiles.chunked(UPLOAD_COMMIT_BATCH_SIZE)
+      val baseMessage = commitMessage.ifBlank { "Upload ${pickedFiles.size} files" }
+
+      batches.forEachIndexed { batchIndex, batch ->
+        val offset = baseOffset + batchIndex * UPLOAD_COMMIT_BATCH_SIZE
+        val builtItems =
+          buildTreeEntriesForFiles(
+            auth = auth,
+            session = activeSession,
+            files = batch.map { joinPath(targetDirPath, it.name) to it.uri },
+            existingPathToSha = currentPathToSha.toMap(),
+            existingRepoBlobShas = currentBlobShas.toSet(),
+            totalCount = pickedFiles.size,
+            progressOffset = offset,
+            onProgress = onProgress,
+          )
+
+        val changedEntries =
+          builtItems.filter { !it.alreadyOnBranchAtSamePath }.map { it.treeEntry }
+        if (changedEntries.isNotEmpty()) {
+          val batchMessage =
+            if (batches.size == 1) baseMessage else "$baseMessage (${batchIndex + 1}/${batches.size})"
+          val statusLabel =
+            if (batches.size == 1) "Committing ${pickedFiles.size} files…"
+            else "Committing batch ${batchIndex + 1}/${batches.size}…"
+          onProgress(offset + batch.size, pickedFiles.size, statusLabel)
+          val (newCommitSha, newTreeSha) =
+            commitTreeAndMoveRef(
+              auth = auth,
+              session = activeSession,
+              parentCommitSha = currentHeadCommitSha,
+              baseTreeSha = currentBaseTreeSha,
+              entries = changedEntries,
+              message = batchMessage,
+            )
+          currentHeadCommitSha = newCommitSha
+          currentBaseTreeSha = newTreeSha
+          for (item in builtItems) {
+            currentPathToSha[item.treeEntry.path] = item.gitSha
+            currentBlobShas.add(item.gitSha)
+          }
         }
-
-      onProgress(pickedFiles.size, pickedFiles.size, "Committing ${pickedFiles.size} files…")
-      commitTreeAndMoveRef(
-        auth = auth,
-        session = activeSession,
-        parentCommitSha = headCommitSha,
-        baseTreeSha = if (truncated) baseTreeSha else null,
-        entries = newTreeEntries,
-        message = commitMessage.ifBlank { "Upload ${pickedFiles.size} files" },
-      )
+      }
       activeSession
     }
 
@@ -528,75 +558,153 @@ class GitHubRepository(private val safHelper: SafFileHelper) {
         }
       }
 
-      val (headCommitSha, baseTreeSha, existingTreeEntries, truncated) = fetchCurrentTree(auth, activeSession)
-      if (replaceExistingFolder && truncated) {
+      val snapshot = fetchCurrentTree(auth, activeSession)
+      if (replaceExistingFolder && snapshot.truncated) {
         throw IllegalStateException("Repository tree is too large for full recursive replacement")
       }
 
-      val offset = localFiles.size - remainingFiles.size
-      val existingRepoBlobShas =
-        existingTreeEntries.asSequence().filter { it.type == "blob" }.map { it.sha }.toSet()
-      val uploadedEntries =
-        buildTreeEntriesForFiles(
-          auth = auth,
-          session = activeSession,
-          files = remainingFiles.map { joinPath(cleanTarget, it.relativePath) to it.uri },
-          existingRepoBlobShas = existingRepoBlobShas,
-          totalCount = localFiles.size,
-          progressOffset = offset,
-          onProgress = onProgress,
-        )
+      val allTargetPaths = localFiles.map { joinPath(cleanTarget, it.relativePath) }.toSet()
+      var currentHeadCommitSha = snapshot.headCommitSha
+      var currentBaseTreeSha = snapshot.baseTreeSha
+      val currentPathToSha =
+        snapshot.entries
+          .asSequence()
+          .filter { it.type == "blob" }
+          .associate { it.path to it.sha }
+          .toMutableMap()
+      val currentBlobShas = currentPathToSha.values.toMutableSet()
 
-      val uploadedPathSet = uploadedEntries.map { it.path }.toSet()
-      val finalEntries =
-        if (!truncated) {
-          val prefix = if (cleanTarget.isEmpty()) "" else "$cleanTarget/"
-          val kept =
-            existingTreeEntries
-              .filter { entry ->
-                if (entry.type == "tree") return@filter false
-                if (entry.path in uploadedPathSet) return@filter false
-                if (replaceExistingFolder) {
-                  if (cleanTarget.isEmpty()) {
-                    false
-                  } else {
-                    entry.path != cleanTarget && !entry.path.startsWith(prefix)
-                  }
-                } else {
-                  true
-                }
-              }
-              .map { CreateTreeEntryRequest(it.path, it.mode, it.type, it.sha) }
-          kept + uploadedEntries
-        } else {
-          uploadedEntries
+      val baseOffset = localFiles.size - remainingFiles.size
+      val batches = remainingFiles.chunked(UPLOAD_COMMIT_BATCH_SIZE)
+      val baseMessage =
+        commitMessage.ifBlank {
+          if (replaceExistingFolder) "Replace folder ${cleanTarget.ifEmpty { "root" }}"
+          else "Upload folder ${cleanTarget.ifEmpty { "root" }}"
         }
 
-      onProgress(localFiles.size, localFiles.size, "Committing ${localFiles.size} files…")
-      commitTreeAndMoveRef(
-        auth = auth,
-        session = activeSession,
-        parentCommitSha = headCommitSha,
-        baseTreeSha = if (truncated) baseTreeSha else null,
-        entries = finalEntries,
-        message =
-          commitMessage.ifBlank {
-            if (replaceExistingFolder) "Replace folder ${cleanTarget.ifEmpty { "root" }}"
-            else "Upload folder ${cleanTarget.ifEmpty { "root" }}"
-          },
-      )
+      batches.forEachIndexed { batchIndex, batch ->
+        val offset = baseOffset + batchIndex * UPLOAD_COMMIT_BATCH_SIZE
+        val builtItems =
+          buildTreeEntriesForFiles(
+            auth = auth,
+            session = activeSession,
+            files = batch.map { joinPath(cleanTarget, it.relativePath) to it.uri },
+            existingPathToSha = currentPathToSha.toMap(),
+            existingRepoBlobShas = currentBlobShas.toSet(),
+            totalCount = localFiles.size,
+            progressOffset = offset,
+            onProgress = onProgress,
+          )
+
+        val changedEntries =
+          builtItems.filter { !it.alreadyOnBranchAtSamePath }.map { it.treeEntry }
+        val isFinalBatch = batchIndex == batches.lastIndex
+        val batchMessage =
+          if (batches.size == 1) baseMessage else "$baseMessage (${batchIndex + 1}/${batches.size})"
+
+        if (!isFinalBatch) {
+          if (changedEntries.isNotEmpty()) {
+            onProgress(
+              offset + batch.size,
+              localFiles.size,
+              "Committing batch ${batchIndex + 1}/${batches.size}…",
+            )
+            val (newCommitSha, newTreeSha) =
+              commitTreeAndMoveRef(
+                auth = auth,
+                session = activeSession,
+                parentCommitSha = currentHeadCommitSha,
+                baseTreeSha = currentBaseTreeSha,
+                entries = changedEntries,
+                message = batchMessage,
+              )
+            currentHeadCommitSha = newCommitSha
+            currentBaseTreeSha = newTreeSha
+            for (item in builtItems) {
+              currentPathToSha[item.treeEntry.path] = item.gitSha
+              currentBlobShas.add(item.gitSha)
+            }
+          }
+        } else {
+          val prefix = if (cleanTarget.isEmpty()) "" else "$cleanTarget/"
+          val hasStaleFiles =
+            replaceExistingFolder &&
+              currentPathToSha.keys.any { path ->
+                val isInside =
+                  if (cleanTarget.isEmpty()) true
+                  else (path == cleanTarget || path.startsWith(prefix))
+                isInside && path !in allTargetPaths
+              }
+
+          if (hasStaleFiles) {
+            onProgress(
+              localFiles.size,
+              localFiles.size,
+              if (batches.size == 1) "Committing ${localFiles.size} files…"
+              else "Finalizing folder (${batchIndex + 1}/${batches.size})…",
+            )
+            val latestSnapshot =
+              if (batches.size > 1) fetchCurrentTree(auth, activeSession) else snapshot
+            val finalChangedPaths = changedEntries.map { it.path }.toSet()
+            val kept =
+              latestSnapshot.entries
+                .filter { entry ->
+                  if (entry.type == "tree") return@filter false
+                  if (entry.path in finalChangedPaths) return@filter false
+                  if (cleanTarget.isEmpty()) {
+                    entry.path in allTargetPaths
+                  } else {
+                    val isInside = entry.path == cleanTarget || entry.path.startsWith(prefix)
+                    !isInside || entry.path in allTargetPaths
+                  }
+                }
+                .map { CreateTreeEntryRequest(it.path, it.mode, it.type, it.sha) }
+
+            commitTreeAndMoveRef(
+              auth = auth,
+              session = activeSession,
+              parentCommitSha = latestSnapshot.headCommitSha,
+              baseTreeSha = null,
+              entries = kept + changedEntries,
+              message = batchMessage,
+            )
+          } else if (changedEntries.isNotEmpty()) {
+            onProgress(
+              localFiles.size,
+              localFiles.size,
+              if (batches.size == 1) "Committing ${localFiles.size} files…"
+              else "Committing batch ${batchIndex + 1}/${batches.size}…",
+            )
+            commitTreeAndMoveRef(
+              auth = auth,
+              session = activeSession,
+              parentCommitSha = currentHeadCommitSha,
+              baseTreeSha = currentBaseTreeSha,
+              entries = changedEntries,
+              message = batchMessage,
+            )
+          }
+        }
+      }
       activeSession
     }
+
+  private data class BuiltTreeItem(
+    val treeEntry: CreateTreeEntryRequest,
+    val gitSha: String,
+    val alreadyOnBranchAtSamePath: Boolean,
+  )
 
   private suspend fun buildTreeEntriesForFiles(
     auth: String,
     session: RepoSession,
     files: List<Pair<String, Uri>>,
+    existingPathToSha: Map<String, String>,
     existingRepoBlobShas: Set<String>,
     totalCount: Int,
     progressOffset: Int,
     onProgress: (completed: Int, total: Int, currentName: String) -> Unit,
-  ): List<CreateTreeEntryRequest> = coroutineScope {
+  ): List<BuiltTreeItem> = coroutineScope {
     val fileReadSemaphore = Semaphore(8)
     val blobUploadSemaphore = Semaphore(6)
     val completedCount = AtomicInteger(progressOffset)
@@ -609,7 +717,7 @@ class GitHubRepository(private val safHelper: SafFileHelper) {
     files
       .map { (remotePath, uri) ->
         async(Dispatchers.IO) {
-          val entry =
+          val item =
             fileReadSemaphore.withPermit {
               val bytes = safHelper.readBytes(uri)
               if (bytes.size > maxSingleBlobBytes) {
@@ -617,12 +725,31 @@ class GitHubRepository(private val safHelper: SafFileHelper) {
               }
 
               val gitSha = computeGitBlobSha1(bytes)
+              if (existingPathToSha[remotePath] == gitSha) {
+                return@withPermit BuiltTreeItem(
+                  treeEntry =
+                    CreateTreeEntryRequest(
+                      path = remotePath,
+                      mode = "100644",
+                      type = "blob",
+                      sha = gitSha,
+                    ),
+                  gitSha = gitSha,
+                  alreadyOnBranchAtSamePath = true,
+                )
+              }
+
               if (gitSha in existingRepoBlobShas) {
-                return@withPermit CreateTreeEntryRequest(
-                  path = remotePath,
-                  mode = "100644",
-                  type = "blob",
-                  sha = gitSha,
+                return@withPermit BuiltTreeItem(
+                  treeEntry =
+                    CreateTreeEntryRequest(
+                      path = remotePath,
+                      mode = "100644",
+                      type = "blob",
+                      sha = gitSha,
+                    ),
+                  gitSha = gitSha,
+                  alreadyOnBranchAtSamePath = false,
                 )
               }
 
@@ -650,11 +777,16 @@ class GitHubRepository(private val safHelper: SafFileHelper) {
                 }
 
               if (inlineText != null) {
-                return@withPermit CreateTreeEntryRequest(
-                  path = remotePath,
-                  mode = "100644",
-                  type = "blob",
-                  content = inlineText,
+                return@withPermit BuiltTreeItem(
+                  treeEntry =
+                    CreateTreeEntryRequest(
+                      path = remotePath,
+                      mode = "100644",
+                      type = "blob",
+                      content = inlineText,
+                    ),
+                  gitSha = gitSha,
+                  alreadyOnBranchAtSamePath = false,
                 )
               }
 
@@ -678,17 +810,22 @@ class GitHubRepository(private val safHelper: SafFileHelper) {
                   }
                 }
 
-              CreateTreeEntryRequest(
-                path = remotePath,
-                mode = "100644",
-                type = "blob",
-                sha = uploadedSha,
+              BuiltTreeItem(
+                treeEntry =
+                  CreateTreeEntryRequest(
+                    path = remotePath,
+                    mode = "100644",
+                    type = "blob",
+                    sha = uploadedSha,
+                  ),
+                gitSha = gitSha,
+                alreadyOnBranchAtSamePath = false,
               )
             }
 
           val done = completedCount.incrementAndGet()
           onProgress(done, totalCount, remotePath)
-          entry
+          item
         }
       }
       .awaitAll()
@@ -905,7 +1042,7 @@ class GitHubRepository(private val safHelper: SafFileHelper) {
     baseTreeSha: String?,
     entries: List<CreateTreeEntryRequest>,
     message: String,
-  ) {
+  ): Pair<String, String> {
     val createdTree =
       safeApiCall {
         api.createTree(
@@ -937,6 +1074,7 @@ class GitHubRepository(private val safHelper: SafFileHelper) {
         UpdateRefRequest(sha = createdCommit.sha),
       )
     }
+    return createdCommit.sha to createdTree.sha
   }
 
   private fun isKnownBinaryExtension(name: String): Boolean {
@@ -997,5 +1135,9 @@ class GitHubRepository(private val safHelper: SafFileHelper) {
     } catch (_: Exception) {
       "Not found (404): Repository '$owner/$repo' not found or token lacks access."
     }
+  }
+
+  private companion object {
+    const val UPLOAD_COMMIT_BATCH_SIZE = 50
   }
 }

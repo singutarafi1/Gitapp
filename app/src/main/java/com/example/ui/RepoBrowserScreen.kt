@@ -98,6 +98,7 @@ fun RepoBrowserScreen(
   onExecuteFolderAction: (targetName: String, replaceExisting: Boolean, message: String) -> Unit,
   onDismissPendingFolderAction: () -> Unit,
   onCancelTransfer: () -> Unit,
+  onRetryTransfer: () -> Unit,
   onClearStatus: () -> Unit,
   onClearError: () -> Unit,
 ) {
@@ -204,6 +205,19 @@ fun RepoBrowserScreen(
               style = MaterialTheme.typography.bodySmall,
               modifier = Modifier.weight(1f),
             )
+            if (uiState.canRetryTransfer) {
+              TextButton(
+                onClick = onRetryTransfer,
+                enabled = !isBusy,
+                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                modifier = Modifier.testTag("retry_transfer_button"),
+              ) {
+                Text(
+                  text = stringResource(R.string.action_retry),
+                  color = MaterialTheme.colorScheme.onErrorContainer,
+                )
+              }
+            }
             IconButton(onClick = onClearError) {
               Icon(
                 imageVector = Icons.Rounded.Close,
