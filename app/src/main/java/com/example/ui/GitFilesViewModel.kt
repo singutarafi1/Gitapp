@@ -69,6 +69,7 @@ data class GitFilesUiState(
   val isLoadingRepos: Boolean = false,
   val showRepoPicker: Boolean = false,
   val accessibleRepos: List<RepoSummary> = emptyList(),
+  val repoPickerNotice: String? = null,
   val canRetryTransfer: Boolean = false,
   val isManagingRepo: Boolean = false,
   val showCreateRepoDialog: Boolean = false,
@@ -237,12 +238,21 @@ class GitFilesViewModel(application: Application) : AndroidViewModel(application
     }
     viewModelScope.launch {
       _uiState.update {
-        it.copy(isLoadingRepos = true, showRepoPicker = true, connectionError = null)
+        it.copy(
+          isLoadingRepos = true,
+          showRepoPicker = true,
+          repoPickerNotice = null,
+          connectionError = null,
+        )
       }
       try {
-        val repos = repository.listAccessibleRepos(token)
+        val result = repository.listAccessibleRepos(token)
         _uiState.update {
-          it.copy(isLoadingRepos = false, accessibleRepos = repos)
+          it.copy(
+            isLoadingRepos = false,
+            accessibleRepos = result.repos,
+            repoPickerNotice = result.notice,
+          )
         }
       } catch (e: Exception) {
         _uiState.update {

@@ -79,7 +79,7 @@ data class GitHubUserDto(
 @JsonClass(generateAdapter = true)
 data class GitHubRepoDto(
   @Json(name = "full_name") val fullName: String,
-  @Json(name = "default_branch") val defaultBranch: String,
+  @Json(name = "default_branch") val defaultBranch: String? = null,
   @Json(name = "html_url") val htmlUrl: String = "",
   val private: Boolean = false,
   val size: Long = 0L,
@@ -90,6 +90,11 @@ data class RepoSummary(
   val htmlUrl: String,
   val defaultBranch: String,
   val isPrivate: Boolean,
+)
+
+data class RepoListResult(
+  val repos: List<RepoSummary>,
+  val notice: String? = null,
 )
 
 @JsonClass(generateAdapter = true)

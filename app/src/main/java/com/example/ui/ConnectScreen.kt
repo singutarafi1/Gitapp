@@ -344,6 +344,20 @@ fun ConnectScreen(
           if (uiState.isManagingRepo) {
             LinearProgressIndicator(modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp))
           }
+          if (!uiState.isLoadingRepos && uiState.repoPickerNotice != null) {
+            Surface(
+              color = MaterialTheme.colorScheme.secondaryContainer,
+              shape = RoundedCornerShape(10.dp),
+              modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+            ) {
+              Text(
+                text = uiState.repoPickerNotice,
+                color = MaterialTheme.colorScheme.onSecondaryContainer,
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.padding(10.dp),
+              )
+            }
+          }
           when {
             uiState.isLoadingRepos -> {
               Box(

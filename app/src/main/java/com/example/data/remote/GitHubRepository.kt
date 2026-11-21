@@ -15,6 +15,7 @@ import com.example.data.model.GitHubErrorDto
 import com.example.data.model.GitTreeEntryDto
 import com.example.data.model.PutContentRequest
 import com.example.data.model.RepoEntry
+import com.example.data.model.RepoListResult
 import com.example.data.model.RepoSession
 import com.example.data.model.RepoSummary
 import com.example.data.model.TransferProgressUpdate
@@ -117,18 +118,21 @@ class GitHubRepository(private val safHelper: SafFileHelper) {
         else "Authentication failed (401): Invalid or expired GitHub token."
       403 -> {
         val msg = apiMessage.orEmpty()
+        val permHint = if (acceptedPerms.isNotBlank()) " [Required: $acceptedPerms]" else ""
         when {
           acceptedPerms.contains("administration", ignoreCase = true) ||
             msg.contains("administration", ignoreCase = true) ||
             msg.contains("delete_repo", ignoreCase = true) ->
-            "Forbidden (403): Token needs 'Administration: Read and write' (Fine-grained PAT) or 'repo' / 'delete_repo' scope (Classic PAT) to create, modify, or delete repositories."
+            "Forbidden (403): Token needs 'Administration: Read and write' (Fine-grained PAT) or 'repo' / 'delete_repo' scope (Classic PAT) to create, modify, or delete repositories.$permHint"
           acceptedPerms.contains("workflows", ignoreCase = true) ||
             msg.contains("workflow", ignoreCase = true) ->
-            "Forbidden (403): Token needs 'Workflows: Read and write' (Fine-grained PAT) or 'workflow' scope (Classic PAT) to upload .github/workflows files."
+            "Forbidden (403): Token needs 'Workflows: Read and write' (Fine-grained PAT) or 'workflow' scope (Classic PAT) to upload .github/workflows files.$permHint"
+          acceptedPerms.contains("contents", ignoreCase = true) ->
+            "Forbidden (403): Token needs 'Contents: Read and write' (and 'Workflows: Read and write' if uploading .github/workflows), with Repository access set to 'All repositories' or this repo selected.$permHint"
           msg.contains("Resource not accessible by personal access token", ignoreCase = true) ->
-            "Forbidden (403): Resource not accessible by personal access token. Enable required permissions in your GitHub Token settings (e.g. 'Contents: Read and write', or 'Administration: Read and write' for repo management)."
-          msg.isNotEmpty() -> "Forbidden (403): $msg"
-          else -> "Forbidden (403): Check token permissions."
+            "Forbidden (403): Resource not accessible by personal access token.$permHint Check Fine-grained PAT: set Repository access to 'All repositories' (or select this repo) and enable 'Contents: Read and write', 'Workflows: Read and write' (for .github/workflows), and 'Administration: Read and write'."
+          msg.isNotEmpty() -> "Forbidden (403): $msg$permHint"
+          else -> "Forbidden (403): Check token permissions.$permHint"
         }
       }
       404 -> apiMessage?.let { "Not found (404): $it" } ?: "Repository, branch, or path not found (404)."
@@ -170,20 +174,51 @@ class GitHubRepository(private val safHelper: SafFileHelper) {
     }
   }
 
-  suspend fun listAccessibleRepos(token: String): List<RepoSummary> =
+  suspend fun listAccessibleRepos(token: String): RepoListResult =
     withContext(Dispatchers.IO) {
       val cleanToken = normalizeToken(token)
       if (cleanToken.isEmpty()) throw IllegalArgumentException("GitHub token is required")
       val auth = "Bearer $cleanToken"
-      val repos = safeApiCall { api.listUserRepos(auth) }
-      repos.map {
-        RepoSummary(
-          fullName = it.fullName,
-          htmlUrl = it.htmlUrl.ifEmpty { "https://github.com/${it.fullName}" },
-          defaultBranch = it.defaultBranch,
-          isPrivate = it.private,
-        )
+
+      val allDtos = mutableListOf<com.example.data.model.GitHubRepoDto>()
+      for (page in 1..5) {
+        val batch = safeApiCall { api.listUserRepos(auth, page = page) }
+        allDtos.addAll(batch)
+        if (batch.size < 100) break
       }
+
+      val summaries =
+        allDtos
+          .distinctBy { it.fullName.lowercase() }
+          .map {
+            RepoSummary(
+              fullName = it.fullName,
+              htmlUrl = it.htmlUrl.ifEmpty { "https://github.com/${it.fullName}" },
+              defaultBranch = it.defaultBranch?.ifEmpty { "main" } ?: "main",
+              isPrivate = it.private,
+            )
+          }
+
+      val hasPrivate = summaries.any { it.isPrivate }
+      val notice =
+        if (!hasPrivate) {
+          val userResp = runCatching { api.getAuthenticatedUser(auth) }.getOrNull()
+          val scopesHeader = userResp?.headers()?.get("X-OAuth-Scopes")
+          if (scopesHeader != null) {
+            val scopes = scopesHeader.split(",").map { it.trim() }.filter { it.isNotEmpty() }
+            if ("repo" !in scopes) {
+              "Classic token is missing 'repo' scope — Private repositories are hidden."
+            } else {
+              null
+            }
+          } else {
+            "No private repositories shown for this Fine-grained token. If you have private repos, check GitHub Token settings -> Repository access = 'All repositories' (or select your private repos)."
+          }
+        } else {
+          null
+        }
+
+      RepoListResult(repos = summaries, notice = notice)
     }
 
   suspend fun connect(
@@ -212,6 +247,7 @@ class GitHubRepository(private val safHelper: SafFileHelper) {
       val branchDtos = safeApiCall { api.listBranches(auth, coords.owner, coords.repo) }
       val branchNames = branchDtos.map { it.name }
       val isEmptyRepo = branchNames.isEmpty()
+      val repoDefaultBranch = repoDto.defaultBranch?.ifEmpty { "main" } ?: "main"
 
       val requestedBranch =
         preferredBranch?.trim()?.takeIf { it.isNotEmpty() }
@@ -219,11 +255,11 @@ class GitHubRepository(private val safHelper: SafFileHelper) {
 
       val activeBranch =
         when {
-          isEmptyRepo -> requestedBranch ?: repoDto.defaultBranch
+          isEmptyRepo -> requestedBranch ?: repoDefaultBranch
           requestedBranch != null && branchNames.contains(requestedBranch) -> requestedBranch
           requestedBranch != null ->
             throw IllegalStateException("Branch '$requestedBranch' was not found in ${repoDto.fullName}")
-          branchNames.contains(repoDto.defaultBranch) -> repoDto.defaultBranch
+          branchNames.contains(repoDefaultBranch) -> repoDefaultBranch
           else -> branchNames.first()
         }
 
@@ -235,7 +271,7 @@ class GitHubRepository(private val safHelper: SafFileHelper) {
           repo = coords.repo,
           fullName = repoDto.fullName,
           branch = activeBranch,
-          defaultBranch = repoDto.defaultBranch,
+          defaultBranch = repoDefaultBranch,
           branches = branchNames.ifEmpty { listOf(activeBranch) },
           isEmptyRepo = isEmptyRepo,
           isPrivate = repoDto.private,
@@ -282,7 +318,7 @@ class GitHubRepository(private val safHelper: SafFileHelper) {
       RepoSummary(
         fullName = dto.fullName,
         htmlUrl = dto.htmlUrl.ifEmpty { "https://github.com/${dto.fullName}" },
-        defaultBranch = dto.defaultBranch.ifEmpty { "main" },
+        defaultBranch = dto.defaultBranch?.ifEmpty { "main" } ?: "main",
         isPrivate = dto.private,
       )
     }
@@ -309,7 +345,7 @@ class GitHubRepository(private val safHelper: SafFileHelper) {
       RepoSummary(
         fullName = dto.fullName,
         htmlUrl = dto.htmlUrl.ifEmpty { "https://github.com/${dto.fullName}" },
-        defaultBranch = dto.defaultBranch.ifEmpty { "main" },
+        defaultBranch = dto.defaultBranch?.ifEmpty { "main" } ?: "main",
         isPrivate = dto.private,
       )
     }

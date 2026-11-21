@@ -46,6 +46,7 @@ interface GitHubApiService {
     @Header("Authorization") auth: String,
     @Query("sort") sort: String = "updated",
     @Query("per_page") perPage: Int = 100,
+    @Query("page") page: Int = 1,
     @Query("affiliation") affiliation: String = "owner,collaborator,organization_member",
     @Query("visibility") visibility: String = "all",
   ): List<GitHubRepoDto>
