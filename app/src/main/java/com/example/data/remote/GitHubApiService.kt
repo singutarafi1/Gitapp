@@ -4,6 +4,7 @@ import com.example.data.model.CreateBlobRequest
 import com.example.data.model.CreateBlobResponse
 import com.example.data.model.CreateCommitRequest
 import com.example.data.model.CreateCommitResponse
+import com.example.data.model.CreateRefRequest
 import com.example.data.model.CreateRepoRequest
 import com.example.data.model.CreateTreeRequest
 import com.example.data.model.CreateTreeResponse
@@ -17,6 +18,7 @@ import com.example.data.model.GitRefDto
 import com.example.data.model.GitTreeResponseDto
 import com.example.data.model.PutContentRequest
 import com.example.data.model.PutContentResponse
+import com.example.data.model.RepoCommitListItemDto
 import com.example.data.model.UpdateRefRequest
 import com.example.data.model.UpdateRepoVisibilityRequest
 import okhttp3.RequestBody
@@ -198,4 +200,22 @@ interface GitHubApiService {
     @Path("branch", encoded = true) encodedBranch: String,
     @Body body: UpdateRefRequest,
   ): GitRefDto
+
+  @POST("repos/{owner}/{repo}/git/refs")
+  suspend fun createBranchRef(
+    @Header("Authorization") auth: String,
+    @Path("owner") owner: String,
+    @Path("repo") repo: String,
+    @Body body: CreateRefRequest,
+  ): GitRefDto
+
+  @GET("repos/{owner}/{repo}/commits")
+  suspend fun listCommits(
+    @Header("Authorization") auth: String,
+    @Path("owner") owner: String,
+    @Path("repo") repo: String,
+    @Query("sha") sha: String,
+    @Query("path") path: String? = null,
+    @Query("per_page") perPage: Int = 15,
+  ): List<RepoCommitListItemDto>
 }

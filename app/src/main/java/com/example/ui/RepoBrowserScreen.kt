@@ -42,6 +42,7 @@ import androidx.compose.material.icons.rounded.Public
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.SwapHoriz
+import androidx.compose.material.icons.rounded.Terminal
 import androidx.compose.material.icons.rounded.UploadFile
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.CircularProgressIndicator
@@ -120,6 +121,7 @@ fun RepoBrowserScreen(
   onSaveNewToken: (label: String, token: String) -> Unit,
   onSelectSavedToken: (SavedToken) -> Unit,
   onDeleteSavedToken: (SavedToken) -> Unit,
+  onOpenTerminal: (initialPath: String?) -> Unit,
   onClearStatus: () -> Unit,
   onClearError: () -> Unit,
 ) {
@@ -225,6 +227,15 @@ fun RepoBrowserScreen(
                 modifier = Modifier.testTag("menu_new_repo"),
               )
               DropdownMenuItem(
+                text = { Text(stringResource(R.string.action_terminal)) },
+                leadingIcon = { Icon(Icons.Rounded.Terminal, contentDescription = null) },
+                onClick = {
+                  showRepoActionsMenu = false
+                  onOpenTerminal(null)
+                },
+                modifier = Modifier.testTag("menu_open_terminal"),
+              )
+              DropdownMenuItem(
                 text = { Text(stringResource(R.string.action_switch_token)) },
                 leadingIcon = { Icon(Icons.Rounded.Key, contentDescription = null) },
                 onClick = {
@@ -272,6 +283,7 @@ fun RepoBrowserScreen(
         onUploadFolder = onUploadFolderClick,
         onNewFile = { showNewFileDialog = true },
         onNewFolder = { showNewFolderDialog = true },
+        onOpenTerminal = { onOpenTerminal(null) },
       )
 
       HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
@@ -378,6 +390,7 @@ fun RepoBrowserScreen(
                   },
                   onRename = { renameTarget = entry },
                   onDelete = { deleteTarget = entry },
+                  onOpenTerminalHere = { onOpenTerminal(entry.path) },
                 )
                 HorizontalDivider(
                   color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
@@ -552,6 +565,7 @@ private fun ActionStrip(
   onUploadFolder: () -> Unit,
   onNewFile: () -> Unit,
   onNewFolder: () -> Unit,
+  onOpenTerminal: () -> Unit,
 ) {
   Row(
     modifier =
@@ -579,6 +593,16 @@ private fun ActionStrip(
       Icon(Icons.AutoMirrored.Rounded.DriveFileMove, contentDescription = null, modifier = Modifier.size(18.dp))
       Spacer(Modifier.width(6.dp))
       Text(stringResource(R.string.action_upload_folder))
+    }
+    FilledTonalButton(
+      onClick = onOpenTerminal,
+      enabled = enabled,
+      contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp),
+      modifier = Modifier.testTag("action_terminal_button"),
+    ) {
+      Icon(Icons.Rounded.Terminal, contentDescription = null, modifier = Modifier.size(18.dp))
+      Spacer(Modifier.width(6.dp))
+      Text(stringResource(R.string.action_terminal))
     }
     FilledTonalButton(
       onClick = onNewFile,
@@ -717,6 +741,7 @@ private fun RepoEntryRow(
   onReplace: () -> Unit,
   onRename: () -> Unit,
   onDelete: () -> Unit,
+  onOpenTerminalHere: () -> Unit,
 ) {
   var menuExpanded by remember { mutableStateOf(false) }
   val isDir = entry.type == EntryType.DIR
@@ -760,7 +785,16 @@ private fun RepoEntryRow(
         Icon(Icons.Rounded.MoreVert, contentDescription = "Actions")
       }
       DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
-        if (!isDir) {
+        if (isDir) {
+          DropdownMenuItem(
+            text = { Text(stringResource(R.string.action_open_terminal_here)) },
+            leadingIcon = { Icon(Icons.Rounded.Terminal, contentDescription = null) },
+            onClick = {
+              menuExpanded = false
+              onOpenTerminalHere()
+            },
+          )
+        } else {
           DropdownMenuItem(
             text = { Text(stringResource(R.string.action_edit)) },
             leadingIcon = { Icon(Icons.Rounded.Edit, contentDescription = null) },

@@ -24,6 +24,7 @@ import com.example.ui.ConnectScreen
 import com.example.ui.FileEditorScreen
 import com.example.ui.GitFilesViewModel
 import com.example.ui.RepoBrowserScreen
+import com.example.ui.RepoTerminalScreen
 import com.example.ui.theme.GitFilesTheme
 
 class MainActivity : ComponentActivity() {
@@ -174,6 +175,7 @@ fun GitFilesApp(viewModel: GitFilesViewModel = viewModel()) {
         onSaveNewToken = viewModel::saveNewToken,
         onSelectSavedToken = viewModel::selectSavedToken,
         onDeleteSavedToken = viewModel::deleteSavedToken,
+        onOpenTerminal = viewModel::openTerminal,
         onClearStatus = viewModel::clearStatusMessage,
         onClearError = viewModel::clearBrowserError,
       )
@@ -195,6 +197,20 @@ fun GitFilesApp(viewModel: GitFilesViewModel = viewModel()) {
         onDelete = viewModel::deleteEntry,
         onBack = viewModel::closeEditor,
         onClearStatus = viewModel::clearStatusMessage,
+      )
+    }
+
+    AppScreen.TERMINAL -> {
+      RepoTerminalScreen(
+        uiState = uiState,
+        onInputChange = viewModel::onTerminalInputChanged,
+        onRunCommand = viewModel::runTerminalCommand,
+        onClearOutput = viewModel::clearTerminalOutput,
+        onHistoryUp = { viewModel.navigateTerminalHistory(-1) },
+        onHistoryDown = { viewModel.navigateTerminalHistory(1) },
+        onClearClipboardEvent = viewModel::clearTerminalClipboardEvent,
+        onClearStatus = viewModel::clearStatusMessage,
+        onBack = viewModel::closeTerminal,
       )
     }
   }

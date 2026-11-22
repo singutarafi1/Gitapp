@@ -34,6 +34,7 @@ enum class AppScreen {
   CONNECT,
   BROWSER,
   EDITOR,
+  TERMINAL,
 }
 
 data class PendingFolderAction(
@@ -81,12 +82,20 @@ data class GitFilesUiState(
   val showAddTokenDialog: Boolean = false,
   val isSavingToken: Boolean = false,
   val tokenDialogError: String? = null,
+  val terminalDir: String = "",
+  val terminalLines: List<TerminalLine> = emptyList(),
+  val terminalCommandInput: String = "",
+  val terminalHistory: List<String> = emptyList(),
+  val terminalHistoryCursor: Int = -1,
+  val isRunningTerminalCommand: Boolean = false,
+  val terminalClipboardCopy: String? = null,
 )
 
 class GitFilesViewModel(application: Application) : AndroidViewModel(application) {
 
   private val safHelper = SafFileHelper(application.applicationContext)
   private val repository = GitHubRepository(safHelper)
+  private val terminalExecutor = RepoTerminalExecutor(repository)
   private val settingsStore = SettingsDataStore(application.applicationContext)
 
   private val appContext = application.applicationContext
@@ -95,6 +104,9 @@ class GitFilesViewModel(application: Application) : AndroidViewModel(application
 
   private var activeTransferJob: Job? = null
   private var lastFailedTransferRetry: (() -> Unit)? = null
+  private var nextTerminalLineId: Long = 1L
+  private var terminalRepoOwnerKey: String = ""
+  private var terminalDidMutateRepo: Boolean = false
 
   fun cancelTransfer() {
     activeTransferJob?.cancel()
@@ -1437,6 +1449,174 @@ class GitFilesViewModel(application: Application) : AndroidViewModel(application
           it.copy(
             transferProgress = null,
             browserError = e.message ?: "Delete failed",
+          )
+        }
+      }
+    }
+  }
+
+  // --- Repo Terminal ---
+
+  private fun newTerminalLine(
+    text: String,
+    kind: TerminalLineKind = TerminalLineKind.OUTPUT,
+  ): TerminalLine = TerminalLine(id = nextTerminalLineId++, text = text, kind = kind)
+
+  fun openTerminal(initialPath: String? = null) {
+    val state = _uiState.value
+    val session = state.session ?: return
+    val targetDir = (initialPath ?: state.currentPath).trim('/')
+    val repoKey = "${session.fullName}@${session.branch}"
+    val existingLines =
+      if (terminalRepoOwnerKey == repoKey && state.terminalLines.isNotEmpty()) {
+        state.terminalLines
+      } else {
+        terminalRepoOwnerKey = repoKey
+        listOf(
+          newTerminalLine(
+            "GitFiles Repo Terminal — ${session.fullName} (${session.branch})",
+            TerminalLineKind.DIRECTORY,
+          ),
+          newTerminalLine(
+            "Type 'help' for commands (ls, cd, cat, touch, mkdir, mv, rm, git log, git branch).",
+            TerminalLineKind.MUTED,
+          ),
+        )
+      }
+    val updatedLines =
+      if (initialPath != null) {
+        val display = if (targetDir.isEmpty()) "/" else "/$targetDir"
+        existingLines + newTerminalLine("Opened terminal at $display", TerminalLineKind.MUTED)
+      } else {
+        existingLines
+      }
+
+    terminalDidMutateRepo = false
+    _uiState.update {
+      it.copy(
+        screen = AppScreen.TERMINAL,
+        terminalDir = targetDir,
+        terminalLines = updatedLines,
+        terminalHistoryCursor = -1,
+      )
+    }
+  }
+
+  fun closeTerminal() {
+    val state = _uiState.value
+    if (state.screen != AppScreen.TERMINAL) return
+    val shouldRefresh = terminalDidMutateRepo
+    terminalDidMutateRepo = false
+    _uiState.update { it.copy(screen = AppScreen.BROWSER) }
+    if (shouldRefresh && state.session != null) {
+      navigateToPath(state.currentPath)
+    }
+  }
+
+  fun onTerminalInputChanged(value: String) {
+    _uiState.update { it.copy(terminalCommandInput = value, terminalHistoryCursor = -1) }
+  }
+
+  fun clearTerminalOutput() {
+    _uiState.update { it.copy(terminalLines = emptyList()) }
+  }
+
+  fun clearTerminalClipboardEvent() {
+    _uiState.update { it.copy(terminalClipboardCopy = null) }
+  }
+
+  fun navigateTerminalHistory(direction: Int) {
+    val state = _uiState.value
+    val history = state.terminalHistory
+    if (history.isEmpty()) return
+    val currentCursor = state.terminalHistoryCursor
+    val nextCursor =
+      if (direction < 0) {
+        if (currentCursor < 0) history.lastIndex else (currentCursor - 1).coerceAtLeast(0)
+      } else {
+        if (currentCursor < 0) -1
+        else if (currentCursor >= history.lastIndex) -1
+        else currentCursor + 1
+      }
+    val nextText = if (nextCursor in history.indices) history[nextCursor] else ""
+    _uiState.update {
+      it.copy(
+        terminalHistoryCursor = nextCursor,
+        terminalCommandInput = nextText,
+      )
+    }
+  }
+
+  fun runTerminalCommand(commandOverride: String? = null) {
+    val state = _uiState.value
+    val session = state.session ?: return
+    if (state.isRunningTerminalCommand) return
+
+    val rawCommand = (commandOverride ?: state.terminalCommandInput).trim()
+    if (rawCommand.isEmpty()) return
+
+    val promptPath = if (state.terminalDir.isEmpty()) "/" else "/${state.terminalDir}"
+    val commandEchoLine = newTerminalLine("$promptPath$ $rawCommand", TerminalLineKind.COMMAND)
+    val updatedHistory =
+      if (state.terminalHistory.lastOrNull() == rawCommand) state.terminalHistory
+      else (state.terminalHistory + rawCommand).takeLast(50)
+
+    _uiState.update {
+      it.copy(
+        terminalLines = it.terminalLines + commandEchoLine,
+        terminalCommandInput = if (commandOverride == null) "" else it.terminalCommandInput,
+        terminalHistory = updatedHistory,
+        terminalHistoryCursor = -1,
+        isRunningTerminalCommand = true,
+      )
+    }
+
+    viewModelScope.launch {
+      try {
+        val activeToken = state.savedTokens.firstOrNull { it.token == session.token }
+        val result =
+          terminalExecutor.execute(
+            rawCommand = rawCommand,
+            session = session,
+            currentDir = state.terminalDir,
+            activeToken = activeToken,
+          )
+
+        if (result.exitTerminal) {
+          _uiState.update { it.copy(isRunningTerminalCommand = false) }
+          closeTerminal()
+          return@launch
+        }
+
+        if (result.didMutateRepo) {
+          terminalDidMutateRepo = true
+        }
+
+        val resolvedSession = result.updatedSession ?: session
+        terminalRepoOwnerKey = "${resolvedSession.fullName}@${resolvedSession.branch}"
+
+        val appendedLines = result.lines.map { (text, kind) -> newTerminalLine(text, kind) }
+        _uiState.update { current ->
+          val baseLines = if (result.clearScreen) emptyList() else current.terminalLines
+          current.copy(
+            session = resolvedSession,
+            terminalDir = result.newDir ?: current.terminalDir,
+            terminalLines = baseLines + appendedLines,
+            isRunningTerminalCommand = false,
+            terminalClipboardCopy = result.clipboardCopyText ?: current.terminalClipboardCopy,
+            statusMessage = if (result.clipboardCopyText != null) "Copied clone command" else current.statusMessage,
+          )
+        }
+
+        result.openEditorEntry?.let { entry ->
+          openFile(entry)
+        }
+      } catch (e: Exception) {
+        val errLine = newTerminalLine(e.message ?: "Command failed", TerminalLineKind.ERROR)
+        _uiState.update {
+          it.copy(
+            terminalLines = it.terminalLines + errLine,
+            isRunningTerminalCommand = false,
           )
         }
       }

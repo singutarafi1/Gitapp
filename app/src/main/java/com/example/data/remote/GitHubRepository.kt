@@ -5,6 +5,7 @@ import com.example.data.local.LocalFolderFile
 import com.example.data.local.LocalPickedFile
 import com.example.data.local.SafFileHelper
 import com.example.data.model.CreateCommitRequest
+import com.example.data.model.CreateRefRequest
 import com.example.data.model.CreateRepoRequest
 import com.example.data.model.CreateTreeEntryRequest
 import com.example.data.model.CreateTreeRequest
@@ -14,10 +15,12 @@ import com.example.data.model.FileDocument
 import com.example.data.model.GitHubErrorDto
 import com.example.data.model.GitTreeEntryDto
 import com.example.data.model.PutContentRequest
+import com.example.data.model.RepoCommitSummary
 import com.example.data.model.RepoEntry
 import com.example.data.model.RepoListResult
 import com.example.data.model.RepoSession
 import com.example.data.model.RepoSummary
+import com.example.data.model.RepoTreeItem
 import com.example.data.model.TransferProgressUpdate
 import com.example.data.model.UpdateRefRequest
 import com.example.data.model.UpdateRepoVisibilityRequest
@@ -431,6 +434,85 @@ class GitHubRepository(private val safHelper: SafFileHelper) {
           )
         }
         .sortedWith(compareBy<RepoEntry> { it.type != EntryType.DIR }.thenBy { it.name.lowercase() })
+    }
+
+  suspend fun findEntryAtPath(session: RepoSession, fullPath: String): RepoEntry? =
+    withContext(Dispatchers.IO) {
+      val clean = fullPath.trim('/')
+      if (clean.isEmpty()) return@withContext null
+      val parent = clean.substringBeforeLast('/', "")
+      val targetName = clean.substringAfterLast('/')
+      listDirectory(session, parent).firstOrNull { it.name == targetName }
+    }
+
+  suspend fun listCommits(
+    session: RepoSession,
+    pathFilter: String? = null,
+    limit: Int = 12,
+  ): List<RepoCommitSummary> =
+    withContext(Dispatchers.IO) {
+      if (session.isEmptyRepo) return@withContext emptyList()
+      val auth = authHeader(session.token)
+      val cleanPath = pathFilter?.trim('/')?.takeIf { it.isNotEmpty() }
+      val dtos =
+        safeApiCall {
+          api.listCommits(
+            auth = auth,
+            owner = session.owner,
+            repo = session.repo,
+            sha = session.branch,
+            path = cleanPath,
+            perPage = limit.coerceIn(1, 50),
+          )
+        }
+      dtos.map { dto ->
+        RepoCommitSummary(
+          sha = dto.sha,
+          shortSha = dto.sha.take(7),
+          message = dto.commit.message.lineSequence().firstOrNull().orEmpty(),
+          authorName = dto.commit.author?.name.orEmpty(),
+          dateIso = dto.commit.author?.date.orEmpty(),
+        )
+      }
+    }
+
+  suspend fun listRecursiveTree(session: RepoSession): Pair<List<RepoTreeItem>, Boolean> =
+    withContext(Dispatchers.IO) {
+      if (session.isEmptyRepo) return@withContext emptyList<RepoTreeItem>() to false
+      val auth = authHeader(session.token)
+      val snapshot = fetchCurrentTree(auth, session)
+      val items =
+        snapshot.entries.map {
+          RepoTreeItem(
+            path = it.path,
+            type = it.type,
+            size = it.size ?: 0L,
+          )
+        }
+      items to snapshot.truncated
+    }
+
+  suspend fun createBranch(session: RepoSession, newBranchName: String): RepoSession =
+    withContext(Dispatchers.IO) {
+      val cleanName = newBranchName.trim().removePrefix("refs/heads/")
+      if (cleanName.isEmpty()) throw IllegalArgumentException("Branch name cannot be empty")
+      if (session.isEmptyRepo) {
+        throw IllegalStateException("Repository has no commits yet. Create a file first before creating a branch.")
+      }
+      val auth = authHeader(session.token)
+      val ref =
+        safeApiCall {
+          api.getBranchRef(auth, session.owner, session.repo, encodeGitHubPath(session.branch))
+        }
+      safeApiCall {
+        api.createBranchRef(
+          auth = auth,
+          owner = session.owner,
+          repo = session.repo,
+          body = CreateRefRequest(ref = "refs/heads/$cleanName", sha = ref.refObject.sha),
+        )
+      }
+      refreshBranches(session).copy(branch = cleanName)
     }
 
   suspend fun getFileDocument(session: RepoSession, entry: RepoEntry): FileDocument =

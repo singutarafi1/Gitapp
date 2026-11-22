@@ -47,4 +47,9 @@
     <string name="action_switch_token">Switch Token</string>
     <string name="label_token_label">Label (optional)</string>
     <string name="hint_token_label">Personal, Work, etc.</string>
+    <string name="action_terminal">Terminal</string>
+    <string name="action_open_terminal_here">Open Terminal here</string>
+    <string name="terminal_clear">Clear</string>
+    <string name="terminal_hint">Type command (help, ls, cd, cat, mkdir, git log…)</string>
+    <string name="action_run">Run</string>
 </resources>

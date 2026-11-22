@@ -52,3 +52,15 @@ val OnErrorContainerDark = Color(0xFFFEE2E2)
 
 val FolderTintLight = Color(0xFF0284C7)
 val FolderTintDark = Color(0xFF38BDF8)
+
+// Terminal palette
+val TerminalBackground = Color(0xFF0D1117)
+val TerminalSurface = Color(0xFF161B22)
+val TerminalBorder = Color(0xFF30363D)
+val TerminalText = Color(0xFFE6EDF3)
+val TerminalMuted = Color(0xFF8B949E)
+val TerminalPrompt = Color(0xFF58A6FF)
+val TerminalDir = Color(0xFF79C0FF)
+val TerminalSuccess = Color(0xFF3FB950)
+val TerminalWarning = Color(0xFFD29922)
+val TerminalError = Color(0xFFF85149)

@@ -245,3 +245,41 @@ data class CreateRepoRequest(
 data class UpdateRepoVisibilityRequest(
   val private: Boolean,
 )
+
+@JsonClass(generateAdapter = true)
+data class RepoCommitListItemDto(
+  val sha: String,
+  val commit: RepoCommitDetailDto,
+)
+
+@JsonClass(generateAdapter = true)
+data class RepoCommitDetailDto(
+  val message: String,
+  val author: RepoCommitAuthorDto? = null,
+)
+
+@JsonClass(generateAdapter = true)
+data class RepoCommitAuthorDto(
+  val name: String = "",
+  val date: String = "",
+)
+
+@JsonClass(generateAdapter = true)
+data class CreateRefRequest(
+  val ref: String,
+  val sha: String,
+)
+
+data class RepoCommitSummary(
+  val sha: String,
+  val shortSha: String,
+  val message: String,
+  val authorName: String,
+  val dateIso: String,
+)
+
+data class RepoTreeItem(
+  val path: String,
+  val type: String,
+  val size: Long,
+)
