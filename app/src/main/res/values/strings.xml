@@ -41,4 +41,10 @@
     <string name="label_description_optional">Description (optional)</string>
     <string name="label_private_repo">Private repository</string>
     <string name="label_init_readme">Initialize with README</string>
+    <string name="label_saved_tokens">Saved Tokens</string>
+    <string name="action_add_token">Add Token</string>
+    <string name="action_manage_tokens">Tokens</string>
+    <string name="action_switch_token">Switch Token</string>
+    <string name="label_token_label">Label (optional)</string>
+    <string name="hint_token_label">Personal, Work, etc.</string>
 </resources>

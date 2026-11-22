@@ -6,6 +6,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.data.local.LocalFolderSelection
 import com.example.data.local.SafFileHelper
+import com.example.data.local.SavedToken
 import com.example.data.local.SettingsDataStore
 import com.example.data.model.EntryType
 import com.example.data.model.FileDocument
@@ -75,6 +76,11 @@ data class GitFilesUiState(
   val showCreateRepoDialog: Boolean = false,
   val repoVisibilityTarget: RepoSummary? = null,
   val repoDeleteTarget: RepoSummary? = null,
+  val savedTokens: List<SavedToken> = emptyList(),
+  val showSavedTokensDialog: Boolean = false,
+  val showAddTokenDialog: Boolean = false,
+  val isSavingToken: Boolean = false,
+  val tokenDialogError: String? = null,
 )
 
 class GitFilesViewModel(application: Application) : AndroidViewModel(application) {
@@ -176,17 +182,16 @@ class GitFilesViewModel(application: Application) : AndroidViewModel(application
     }
     viewModelScope.launch {
       val saved = settingsStore.savedConnection.first()
-      if (saved.token.isNotBlank() || saved.repoUrl.isNotBlank()) {
-        _uiState.update {
-          it.copy(
-            tokenInput = saved.token,
-            repoUrlInput = saved.repoUrl,
-            branchInput = saved.branch,
-          )
-        }
-        if (saved.token.isNotBlank() && saved.repoUrl.isNotBlank()) {
-          connect()
-        }
+      _uiState.update {
+        it.copy(
+          tokenInput = saved.token,
+          repoUrlInput = saved.repoUrl,
+          branchInput = saved.branch,
+          savedTokens = saved.savedTokens,
+        )
+      }
+      if (saved.token.isNotBlank() && saved.repoUrl.isNotBlank()) {
+        connect()
       }
     }
   }
@@ -226,7 +231,126 @@ class GitFilesViewModel(application: Application) : AndroidViewModel(application
     viewModelScope.launch {
       lastFailedTransferRetry = null
       settingsStore.clearConnection()
-      _uiState.value = GitFilesUiState()
+      val keptTokens = _uiState.value.savedTokens
+      _uiState.value = GitFilesUiState(savedTokens = keptTokens)
+    }
+  }
+
+  fun openSavedTokensDialog() {
+    _uiState.update { it.copy(showSavedTokensDialog = true, tokenDialogError = null) }
+  }
+
+  fun dismissSavedTokensDialog() {
+    _uiState.update { it.copy(showSavedTokensDialog = false) }
+  }
+
+  fun openAddTokenDialog() {
+    _uiState.update { it.copy(showAddTokenDialog = true, tokenDialogError = null) }
+  }
+
+  fun dismissAddTokenDialog() {
+    _uiState.update { it.copy(showAddTokenDialog = false, tokenDialogError = null) }
+  }
+
+  fun saveNewToken(label: String, rawToken: String) {
+    val cleanToken = rawToken.trim()
+    if (cleanToken.isEmpty()) {
+      _uiState.update { it.copy(tokenDialogError = "Enter a GitHub Personal Access Token") }
+      return
+    }
+    viewModelScope.launch {
+      _uiState.update { it.copy(isSavingToken = true, tokenDialogError = null) }
+      try {
+        val login = repository.fetchTokenOwnerLogin(cleanToken).orEmpty()
+        val previousToken = _uiState.value.tokenInput.trim()
+        val tokenChanged = previousToken != cleanToken
+        val updatedTokens =
+          settingsStore.addOrUpdateSavedToken(
+            label = label,
+            token = cleanToken,
+            username = login,
+            setAsActive = true,
+          )
+        if (tokenChanged) {
+          settingsStore.clearRepoSelection()
+        }
+        val savedLabel = updatedTokens.firstOrNull { it.token == cleanToken }?.label ?: "token"
+        _uiState.update { state ->
+          state.copy(
+            tokenInput = cleanToken,
+            savedTokens = updatedTokens,
+            isSavingToken = false,
+            showAddTokenDialog = false,
+            showSavedTokensDialog = false,
+            tokenDialogError = null,
+            connectionError = null,
+            accessibleRepos = if (tokenChanged) emptyList() else state.accessibleRepos,
+            repoPickerNotice = if (tokenChanged) null else state.repoPickerNotice,
+            repoUrlInput = if (tokenChanged) "" else state.repoUrlInput,
+            branchInput = if (tokenChanged) "" else state.branchInput,
+            session = if (tokenChanged) null else state.session,
+            entries = if (tokenChanged) emptyList() else state.entries,
+            currentPath = if (tokenChanged) "" else state.currentPath,
+            screen = if (tokenChanged && state.screen != AppScreen.CONNECT) AppScreen.CONNECT else state.screen,
+            statusMessage = "Saved $savedLabel",
+          )
+        }
+      } catch (e: Exception) {
+        _uiState.update {
+          it.copy(
+            isSavingToken = false,
+            tokenDialogError = e.message ?: "Failed to verify token",
+          )
+        }
+      }
+    }
+  }
+
+  fun selectSavedToken(savedToken: SavedToken) {
+    viewModelScope.launch {
+      val currentToken = _uiState.value.tokenInput.trim()
+      val sessionToken = _uiState.value.session?.token
+      val tokenChanged = currentToken != savedToken.token || (sessionToken != null && sessionToken != savedToken.token)
+      settingsStore.selectActiveToken(savedToken.token, clearRepo = tokenChanged)
+      _uiState.update { state ->
+        state.copy(
+          tokenInput = savedToken.token,
+          showSavedTokensDialog = false,
+          connectionError = null,
+          accessibleRepos = if (tokenChanged) emptyList() else state.accessibleRepos,
+          repoPickerNotice = if (tokenChanged) null else state.repoPickerNotice,
+          repoUrlInput = if (tokenChanged) "" else state.repoUrlInput,
+          branchInput = if (tokenChanged) "" else state.branchInput,
+          session = if (tokenChanged) null else state.session,
+          entries = if (tokenChanged) emptyList() else state.entries,
+          currentPath = if (tokenChanged) "" else state.currentPath,
+          screen = if (tokenChanged && state.screen != AppScreen.CONNECT) AppScreen.CONNECT else state.screen,
+          statusMessage = "Switched to ${savedToken.label}",
+        )
+      }
+    }
+  }
+
+  fun deleteSavedToken(savedToken: SavedToken) {
+    viewModelScope.launch {
+      val remaining = settingsStore.removeSavedToken(savedToken.id)
+      val deletedActive = _uiState.value.tokenInput.trim() == savedToken.token
+      val deletedSession = _uiState.value.session?.token == savedToken.token
+      _uiState.update { state ->
+        state.copy(
+          savedTokens = remaining,
+          tokenInput = if (deletedActive) "" else state.tokenInput,
+          repoUrlInput = if (deletedActive) "" else state.repoUrlInput,
+          branchInput = if (deletedActive) "" else state.branchInput,
+          accessibleRepos = if (deletedActive) emptyList() else state.accessibleRepos,
+          repoPickerNotice = if (deletedActive) null else state.repoPickerNotice,
+          session = if (deletedSession) null else state.session,
+          entries = if (deletedSession) emptyList() else state.entries,
+          currentPath = if (deletedSession) "" else state.currentPath,
+          screen = if (deletedSession) AppScreen.CONNECT else state.screen,
+          statusMessage = "Removed ${savedToken.label}",
+        )
+      }
     }
   }
 
@@ -532,11 +656,14 @@ class GitFilesViewModel(application: Application) : AndroidViewModel(application
       _uiState.update { it.copy(isConnecting = true, connectionError = null) }
       try {
         val (session, initialPath) = repository.connect(token, repoUrl, branch)
-        settingsStore.saveConnection(token, repoUrl, session.branch)
+        val login = runCatching { repository.fetchTokenOwnerLogin(token) }.getOrNull().orEmpty()
+        val updatedTokens =
+          settingsStore.saveConnection(token, repoUrl, session.branch, username = login)
         _uiState.update {
           it.copy(
             isConnecting = false,
             session = session,
+            savedTokens = updatedTokens,
             branchInput = session.branch,
             currentPath = initialPath,
             screen = AppScreen.BROWSER,

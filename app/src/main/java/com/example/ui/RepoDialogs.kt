@@ -7,16 +7,30 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Check
+import androidx.compose.material.icons.rounded.Delete
+import androidx.compose.material.icons.rounded.Key
+import androidx.compose.material.icons.rounded.Visibility
+import androidx.compose.material.icons.rounded.VisibilityOff
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -24,14 +38,21 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.R
+import com.example.data.local.SavedToken
+import com.example.data.local.maskToken
 import com.example.data.model.EntryType
 import com.example.data.model.RepoEntry
 import com.example.data.model.RepoSummary
@@ -584,6 +605,198 @@ fun DeleteRepoConfirmDialog(
     },
     dismissButton = {
       TextButton(onClick = onDismiss) { Text(stringResource(R.string.action_cancel)) }
+    },
+  )
+}
+
+@Composable
+fun SavedTokensDialog(
+  savedTokens: List<SavedToken>,
+  activeToken: String,
+  onDismiss: () -> Unit,
+  onSelect: (SavedToken) -> Unit,
+  onDelete: (SavedToken) -> Unit,
+  onOpenAddToken: () -> Unit,
+) {
+  AlertDialog(
+    onDismissRequest = onDismiss,
+    title = {
+      Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween,
+      ) {
+        Text(stringResource(R.string.label_saved_tokens))
+        TextButton(
+          onClick = onOpenAddToken,
+          modifier = Modifier.testTag("saved_tokens_add_button"),
+        ) {
+          Icon(
+            imageVector = Icons.Rounded.Add,
+            contentDescription = null,
+            modifier = Modifier.size(18.dp),
+          )
+          Spacer(modifier = Modifier.width(4.dp))
+          Text(stringResource(R.string.action_add_token))
+        }
+      }
+    },
+    text = {
+      if (savedTokens.isEmpty()) {
+        Text(
+          text = "No saved tokens yet. Tap Add Token to store multiple GitHub tokens.",
+          style = MaterialTheme.typography.bodyMedium,
+          color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+      } else {
+        LazyColumn(modifier = Modifier.fillMaxWidth().heightIn(max = 360.dp)) {
+          items(savedTokens, key = { it.id }) { item ->
+            val isSelected = item.token == activeToken.trim()
+            Row(
+              modifier =
+                Modifier.fillMaxWidth()
+                  .clickable { onSelect(item) }
+                  .padding(start = 4.dp, top = 8.dp, bottom = 8.dp)
+                  .testTag("saved_token_row_${item.id}"),
+              verticalAlignment = Alignment.CenterVertically,
+              horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+              Icon(
+                imageVector = if (isSelected) Icons.Rounded.Check else Icons.Rounded.Key,
+                contentDescription = if (isSelected) "Active" else "Token",
+                tint =
+                  if (isSelected) MaterialTheme.colorScheme.primary
+                  else MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(18.dp),
+              )
+              Column(modifier = Modifier.weight(1f)) {
+                Text(
+                  text =
+                    if (item.username.isNotBlank() && item.label != "@${item.username}") {
+                      "${item.label} (@${item.username})"
+                    } else {
+                      item.label
+                    },
+                  style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Medium),
+                  maxLines = 1,
+                  overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                  text = maskToken(item.token),
+                  style = CodeTextStyle,
+                  color = MaterialTheme.colorScheme.onSurfaceVariant,
+                  maxLines = 1,
+                  overflow = TextOverflow.Ellipsis,
+                )
+              }
+              IconButton(
+                onClick = { onDelete(item) },
+                modifier = Modifier.testTag("delete_saved_token_${item.id}"),
+              ) {
+                Icon(
+                  imageVector = Icons.Rounded.Delete,
+                  contentDescription = stringResource(R.string.action_delete),
+                  tint = MaterialTheme.colorScheme.error,
+                )
+              }
+            }
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+          }
+        }
+      }
+    },
+    confirmButton = {
+      TextButton(onClick = onDismiss) { Text(stringResource(R.string.action_cancel)) }
+    },
+  )
+}
+
+@Composable
+fun AddTokenDialog(
+  isSaving: Boolean,
+  errorMessage: String?,
+  onDismiss: () -> Unit,
+  onSave: (label: String, token: String) -> Unit,
+) {
+  var label by rememberSaveable { mutableStateOf("") }
+  var tokenValue by rememberSaveable { mutableStateOf("") }
+  var showToken by rememberSaveable { mutableStateOf(false) }
+
+  AlertDialog(
+    onDismissRequest = { if (!isSaving) onDismiss() },
+    title = { Text(stringResource(R.string.action_add_token)) },
+    text = {
+      Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        OutlinedTextField(
+          value = label,
+          onValueChange = { label = it },
+          label = { Text(stringResource(R.string.label_token_label)) },
+          placeholder = { Text(stringResource(R.string.hint_token_label)) },
+          singleLine = true,
+          enabled = !isSaving,
+          modifier = Modifier.fillMaxWidth().testTag("add_token_label_input"),
+        )
+        OutlinedTextField(
+          value = tokenValue,
+          onValueChange = { tokenValue = it },
+          label = { Text(stringResource(R.string.label_github_token)) },
+          placeholder = { Text(stringResource(R.string.hint_github_token)) },
+          trailingIcon = {
+            IconButton(
+              onClick = { showToken = !showToken },
+              modifier = Modifier.testTag("add_token_visibility_button"),
+            ) {
+              Icon(
+                imageVector = if (showToken) Icons.Rounded.VisibilityOff else Icons.Rounded.Visibility,
+                contentDescription = if (showToken) "Hide token" else "Show token",
+              )
+            }
+          },
+          visualTransformation =
+            if (showToken) VisualTransformation.None else PasswordVisualTransformation(),
+          keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+          singleLine = true,
+          textStyle = CodeTextStyle,
+          enabled = !isSaving,
+          modifier = Modifier.fillMaxWidth().testTag("add_token_value_input"),
+        )
+        if (errorMessage != null) {
+          Surface(
+            color = MaterialTheme.colorScheme.errorContainer,
+            shape = RoundedCornerShape(10.dp),
+            modifier = Modifier.fillMaxWidth(),
+          ) {
+            Text(
+              text = errorMessage,
+              color = MaterialTheme.colorScheme.onErrorContainer,
+              style = MaterialTheme.typography.bodySmall,
+              modifier = Modifier.padding(10.dp),
+            )
+          }
+        }
+      }
+    },
+    confirmButton = {
+      Button(
+        onClick = { onSave(label, tokenValue) },
+        enabled = !isSaving && tokenValue.trim().isNotEmpty(),
+        modifier = Modifier.testTag("confirm_add_token_button"),
+      ) {
+        if (isSaving) {
+          CircularProgressIndicator(
+            modifier = Modifier.size(16.dp),
+            strokeWidth = 2.dp,
+            color = MaterialTheme.colorScheme.onPrimary,
+          )
+          Spacer(modifier = Modifier.width(8.dp))
+        }
+        Text(stringResource(R.string.action_confirm))
+      }
+    },
+    dismissButton = {
+      TextButton(onClick = onDismiss, enabled = !isSaving) {
+        Text(stringResource(R.string.action_cancel))
+      }
     },
   )
 }

@@ -35,6 +35,7 @@ import androidx.compose.material.icons.rounded.DriveFileRenameOutline
 import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.Folder
 import androidx.compose.material.icons.rounded.FolderOpen
+import androidx.compose.material.icons.rounded.Key
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.Public
@@ -73,6 +74,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.R
+import com.example.data.local.SavedToken
 import com.example.data.model.EntryType
 import com.example.data.model.RepoEntry
 import com.example.data.model.TransferProgress
@@ -111,6 +113,13 @@ fun RepoBrowserScreen(
   onRequestDeleteCurrentRepo: () -> Unit,
   onDismissDeleteRepo: () -> Unit,
   onConfirmDeleteRepo: () -> Unit,
+  onOpenSavedTokens: () -> Unit,
+  onDismissSavedTokens: () -> Unit,
+  onOpenAddToken: () -> Unit,
+  onDismissAddToken: () -> Unit,
+  onSaveNewToken: (label: String, token: String) -> Unit,
+  onSelectSavedToken: (SavedToken) -> Unit,
+  onDeleteSavedToken: (SavedToken) -> Unit,
   onClearStatus: () -> Unit,
   onClearError: () -> Unit,
 ) {
@@ -214,6 +223,15 @@ fun RepoBrowserScreen(
                   onOpenCreateRepo()
                 },
                 modifier = Modifier.testTag("menu_new_repo"),
+              )
+              DropdownMenuItem(
+                text = { Text(stringResource(R.string.action_switch_token)) },
+                leadingIcon = { Icon(Icons.Rounded.Key, contentDescription = null) },
+                onClick = {
+                  showRepoActionsMenu = false
+                  onOpenSavedTokens()
+                },
+                modifier = Modifier.testTag("menu_switch_token"),
               )
               DropdownMenuItem(
                 text = {
@@ -458,6 +476,26 @@ fun RepoBrowserScreen(
       repo = target,
       onDismiss = onDismissDeleteRepo,
       onConfirm = onConfirmDeleteRepo,
+    )
+  }
+
+  if (uiState.showSavedTokensDialog) {
+    SavedTokensDialog(
+      savedTokens = uiState.savedTokens,
+      activeToken = uiState.tokenInput,
+      onDismiss = onDismissSavedTokens,
+      onSelect = onSelectSavedToken,
+      onDelete = onDeleteSavedToken,
+      onOpenAddToken = onOpenAddToken,
+    )
+  }
+
+  if (uiState.showAddTokenDialog) {
+    AddTokenDialog(
+      isSaving = uiState.isSavingToken,
+      errorMessage = uiState.tokenDialogError,
+      onDismiss = onDismissAddToken,
+      onSave = onSaveNewToken,
     )
   }
 }

@@ -53,15 +53,14 @@ class GitHubRepository(private val safHelper: SafFileHelper) {
 
   private val api: GitHubApiService by lazy {
     val headerInterceptor = Interceptor { chain ->
-      val request =
-        chain
-          .request()
-          .newBuilder()
-          .header("Accept", "application/vnd.github+json")
-          .header("X-GitHub-Api-Version", "2022-11-28")
-          .header("User-Agent", "GitFiles-Android")
-          .build()
-      chain.proceed(request)
+      val original = chain.request()
+      val builder = original.newBuilder()
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .header("User-Agent", "GitFiles-Android")
+      if (original.header("Accept") == null) {
+        builder.header("Accept", "application/vnd.github+json")
+      }
+      chain.proceed(builder.build())
     }
 
     val client =
@@ -173,6 +172,18 @@ class GitHubRepository(private val safHelper: SafFileHelper) {
       }
     }
   }
+
+  suspend fun fetchTokenOwnerLogin(token: String): String? =
+    withContext(Dispatchers.IO) {
+      val cleanToken = normalizeToken(token)
+      if (cleanToken.isEmpty()) return@withContext null
+      val auth = "Bearer $cleanToken"
+      val resp = runCatching { api.getAuthenticatedUser(auth) }.getOrNull() ?: return@withContext null
+      if (resp.code() == 401) {
+        throw IllegalStateException("Authentication failed (401): Invalid or expired GitHub token.")
+      }
+      if (resp.isSuccessful) resp.body()?.login else null
+    }
 
   suspend fun listAccessibleRepos(token: String): RepoListResult =
     withContext(Dispatchers.IO) {

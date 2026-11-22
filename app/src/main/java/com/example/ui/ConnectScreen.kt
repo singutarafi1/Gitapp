@@ -3,6 +3,7 @@ package com.example.ui
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -29,6 +30,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.FolderCopy
 import androidx.compose.material.icons.rounded.FolderOpen
@@ -40,11 +42,13 @@ import androidx.compose.material.icons.rounded.Public
 import androidx.compose.material.icons.rounded.Visibility
 import androidx.compose.material.icons.rounded.VisibilityOff
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -78,6 +82,7 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.R
+import com.example.data.local.SavedToken
 import com.example.data.model.RepoSummary
 import com.example.ui.theme.CodeTextStyle
 
@@ -101,6 +106,13 @@ fun ConnectScreen(
   onRequestDeleteRepo: (RepoSummary) -> Unit,
   onDismissDeleteRepo: () -> Unit,
   onConfirmDeleteRepo: () -> Unit,
+  onOpenSavedTokens: () -> Unit,
+  onDismissSavedTokens: () -> Unit,
+  onOpenAddToken: () -> Unit,
+  onDismissAddToken: () -> Unit,
+  onSaveNewToken: (label: String, token: String) -> Unit,
+  onSelectSavedToken: (SavedToken) -> Unit,
+  onDeleteSavedToken: (SavedToken) -> Unit,
   onClearStatus: () -> Unit,
   onBackToBrowser: () -> Unit,
   onDisconnect: () -> Unit,
@@ -209,6 +221,60 @@ fun ConnectScreen(
             ),
           modifier = Modifier.fillMaxWidth().testTag("token_input"),
         )
+
+        Row(
+          modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+          horizontalArrangement = Arrangement.spacedBy(8.dp),
+          verticalAlignment = Alignment.CenterVertically,
+        ) {
+          uiState.savedTokens.forEach { saved ->
+            val selected = saved.token == uiState.tokenInput.trim()
+            FilterChip(
+              selected = selected,
+              onClick = { onSelectSavedToken(saved) },
+              label = { Text(saved.label) },
+              leadingIcon =
+                if (selected) {
+                  {
+                    Icon(
+                      imageVector = Icons.Rounded.Check,
+                      contentDescription = null,
+                      modifier = Modifier.size(16.dp),
+                    )
+                  }
+                } else {
+                  null
+                },
+              modifier = Modifier.testTag("saved_token_chip_${saved.id}"),
+            )
+          }
+          AssistChip(
+            onClick = onOpenAddToken,
+            label = { Text(stringResource(R.string.action_add_token)) },
+            leadingIcon = {
+              Icon(
+                imageVector = Icons.Rounded.Add,
+                contentDescription = null,
+                modifier = Modifier.size(16.dp),
+              )
+            },
+            modifier = Modifier.testTag("add_token_chip"),
+          )
+          if (uiState.savedTokens.isNotEmpty()) {
+            AssistChip(
+              onClick = onOpenSavedTokens,
+              label = { Text("${stringResource(R.string.action_manage_tokens)} (${uiState.savedTokens.size})") },
+              leadingIcon = {
+                Icon(
+                  imageVector = Icons.Rounded.Key,
+                  contentDescription = null,
+                  modifier = Modifier.size(16.dp),
+                )
+              },
+              modifier = Modifier.testTag("manage_tokens_chip"),
+            )
+          }
+        }
 
         OutlinedTextField(
           value = uiState.repoUrlInput,
@@ -501,6 +567,26 @@ fun ConnectScreen(
       repo = target,
       onDismiss = onDismissDeleteRepo,
       onConfirm = onConfirmDeleteRepo,
+    )
+  }
+
+  if (uiState.showSavedTokensDialog) {
+    SavedTokensDialog(
+      savedTokens = uiState.savedTokens,
+      activeToken = uiState.tokenInput,
+      onDismiss = onDismissSavedTokens,
+      onSelect = onSelectSavedToken,
+      onDelete = onDeleteSavedToken,
+      onOpenAddToken = onOpenAddToken,
+    )
+  }
+
+  if (uiState.showAddTokenDialog) {
+    AddTokenDialog(
+      isSaving = uiState.isSavingToken,
+      errorMessage = uiState.tokenDialogError,
+      onDismiss = onDismissAddToken,
+      onSave = onSaveNewToken,
     )
   }
 }
