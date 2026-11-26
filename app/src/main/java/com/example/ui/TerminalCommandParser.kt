@@ -1,6 +1,84 @@
 package com.example.ui
 
+data class EchoRedirectCommand(
+  val content: String,
+  val targetPath: String,
+  val append: Boolean,
+)
+
+data class ChainedCommandPart(
+  val command: String,
+  val stopOnFailure: Boolean,
+)
+
 object TerminalCommandParser {
+
+  /**
+   * Splits a command line into sequential parts separated by unquoted `&&` or `;`.
+   */
+  fun splitChainedCommands(input: String): List<ChainedCommandPart> {
+    val parts = mutableListOf<ChainedCommandPart>()
+    val current = StringBuilder()
+    var inSingleQuote = false
+    var inDoubleQuote = false
+    var escaping = false
+    var pendingStopOnFailure = false
+    var i = 0
+
+    while (i < input.length) {
+      val ch = input[i]
+      when {
+        escaping -> {
+          current.append(ch)
+          escaping = false
+          i++
+        }
+        ch == '\\' && !inSingleQuote -> {
+          current.append(ch)
+          escaping = true
+          i++
+        }
+        ch == '\'' && !inDoubleQuote -> {
+          inSingleQuote = !inSingleQuote
+          current.append(ch)
+          i++
+        }
+        ch == '"' && !inSingleQuote -> {
+          inDoubleQuote = !inDoubleQuote
+          current.append(ch)
+          i++
+        }
+        !inSingleQuote && !inDoubleQuote && ch == ';' -> {
+          val cmd = current.toString().trim()
+          if (cmd.isNotEmpty()) {
+            parts += ChainedCommandPart(cmd, pendingStopOnFailure)
+          }
+          current.clear()
+          pendingStopOnFailure = false
+          i++
+        }
+        !inSingleQuote && !inDoubleQuote && ch == '&' && i + 1 < input.length && input[i + 1] == '&' -> {
+          val cmd = current.toString().trim()
+          if (cmd.isNotEmpty()) {
+            parts += ChainedCommandPart(cmd, pendingStopOnFailure)
+          }
+          current.clear()
+          pendingStopOnFailure = true
+          i += 2
+        }
+        else -> {
+          current.append(ch)
+          i++
+        }
+      }
+    }
+
+    val tail = current.toString().trim()
+    if (tail.isNotEmpty()) {
+      parts += ChainedCommandPart(tail, pendingStopOnFailure)
+    }
+    return parts
+  }
 
   /**
    * Tokenizes a shell-like command line while respecting single quotes, double quotes,
@@ -88,18 +166,34 @@ object TerminalCommandParser {
   }
 
   /**
-   * Parses `echo <text> > <file>` redirection syntax if present.
-   * Returns (content, targetPath) or null when not an echo redirection.
+   * Parses `echo <text> > <file>` or `echo <text> >> <file>` redirection syntax if present.
    */
-  fun parseEchoRedirect(rawCommand: String): Pair<String, String>? {
+  fun parseEchoRedirect(rawCommand: String): EchoRedirectCommand? {
     val trimmed = rawCommand.trim()
     if (!trimmed.startsWith("echo ", ignoreCase = true)) return null
     val tokens = tokenize(trimmed)
-    val redirectIdx = tokens.indexOfLast { it == ">" }
+    val redirectIdx = tokens.indexOfLast { it == ">" || it == ">>" }
     if (redirectIdx <= 0 || redirectIdx >= tokens.lastIndex) return null
+    val append = tokens[redirectIdx] == ">>"
     val content = tokens.subList(1, redirectIdx).joinToString(" ")
     val target = tokens.subList(redirectIdx + 1, tokens.size).joinToString(" ").trim()
     if (target.isEmpty()) return null
-    return content to target
+    return EchoRedirectCommand(content = content, targetPath = target, append = append)
+  }
+
+  fun longestCommonPrefix(values: List<String>): String {
+    if (values.isEmpty()) return ""
+    var prefix = values.first()
+    for (i in 1 until values.size) {
+      val next = values[i]
+      val limit = minOf(prefix.length, next.length)
+      var matchLen = 0
+      while (matchLen < limit && prefix[matchLen] == next[matchLen]) {
+        matchLen++
+      }
+      prefix = prefix.substring(0, matchLen)
+      if (prefix.isEmpty()) break
+    }
+    return prefix
   }
 }

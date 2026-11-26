@@ -8,8 +8,11 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.consumeWindowInsets
+import androidx.compose.foundation.layout.exclude
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
@@ -110,7 +113,7 @@ fun FileEditorScreen(
     }
 
   Scaffold(
-    contentWindowInsets = WindowInsets.safeDrawing,
+    contentWindowInsets = WindowInsets.safeDrawing.exclude(WindowInsets.ime),
     snackbarHost = { SnackbarHost(snackbarHostState) },
     topBar = {
       TopAppBar(
@@ -179,7 +182,13 @@ fun FileEditorScreen(
       )
     },
   ) { innerPadding ->
-    Column(modifier = Modifier.fillMaxSize().padding(innerPadding).imePadding()) {
+    Column(
+      modifier =
+        Modifier.fillMaxSize()
+          .padding(innerPadding)
+          .consumeWindowInsets(innerPadding)
+          .imePadding()
+    ) {
       if (uiState.transferProgress != null) {
         androidx.compose.material3.LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
       }

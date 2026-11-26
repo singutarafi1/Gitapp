@@ -89,6 +89,7 @@ data class GitFilesUiState(
   val terminalHistoryCursor: Int = -1,
   val isRunningTerminalCommand: Boolean = false,
   val terminalClipboardCopy: String? = null,
+  val terminalLaunchTermuxCommand: String? = null,
   val uploadBatchSizeInput: String = SettingsDataStore.DEFAULT_UPLOAD_BATCH_SIZE.toString(),
 )
 
@@ -104,6 +105,7 @@ class GitFilesViewModel(application: Application) : AndroidViewModel(application
   val uiState: StateFlow<GitFilesUiState> = _uiState.asStateFlow()
 
   private var activeTransferJob: Job? = null
+  private var activeTerminalJob: Job? = null
   private var lastFailedTransferRetry: (() -> Unit)? = null
   private var nextTerminalLineId: Long = 1L
   private var terminalRepoOwnerKey: String = ""
@@ -1516,19 +1518,19 @@ class GitFilesViewModel(application: Application) : AndroidViewModel(application
         terminalRepoOwnerKey = repoKey
         listOf(
           newTerminalLine(
-            "GitFiles Repo Terminal — ${session.fullName} (${session.branch})",
+            "Welcome to GitFiles Termux Shell — ${session.fullName} [${session.branch}]",
             TerminalLineKind.DIRECTORY,
           ),
           newTerminalLine(
-            "Type 'help' for commands (ls, cd, cat, touch, mkdir, mv, rm, git log, git branch).",
+            "Type 'help' for commands (ls, cd, grep, cat, touch, cp, mv, rm, git show/log) or 'termux' to open Termux.",
             TerminalLineKind.MUTED,
           ),
         )
       }
     val updatedLines =
       if (initialPath != null) {
-        val display = if (targetDir.isEmpty()) "/" else "/$targetDir"
-        existingLines + newTerminalLine("Opened terminal at $display", TerminalLineKind.MUTED)
+        val display = if (targetDir.isEmpty()) "~" else "~/$targetDir"
+        existingLines + newTerminalLine("cd $display", TerminalLineKind.MUTED)
       } else {
         existingLines
       }
@@ -1567,6 +1569,62 @@ class GitFilesViewModel(application: Application) : AndroidViewModel(application
     _uiState.update { it.copy(terminalClipboardCopy = null) }
   }
 
+  fun clearTerminalLaunchEvent() {
+    _uiState.update { it.copy(terminalLaunchTermuxCommand = null) }
+  }
+
+  fun interruptOrClearTerminalLine() {
+    val state = _uiState.value
+    val promptPath = if (state.terminalDir.isEmpty()) "~" else "~/${state.terminalDir}"
+    if (state.isRunningTerminalCommand) {
+      activeTerminalJob?.cancel()
+      activeTerminalJob = null
+      val line = newTerminalLine("^C (interrupted)", TerminalLineKind.WARNING)
+      _uiState.update {
+        it.copy(
+          isRunningTerminalCommand = false,
+          terminalLines = it.terminalLines + line,
+        )
+      }
+      return
+    }
+    if (state.terminalCommandInput.isNotEmpty()) {
+      val line = newTerminalLine("$promptPath $ ${state.terminalCommandInput}^C", TerminalLineKind.MUTED)
+      _uiState.update {
+        it.copy(
+          terminalCommandInput = "",
+          terminalHistoryCursor = -1,
+          terminalLines = it.terminalLines + line,
+        )
+      }
+    }
+  }
+
+  fun tabCompleteTerminalInput() {
+    val state = _uiState.value
+    val session = state.session ?: return
+    if (state.isRunningTerminalCommand) return
+    val snapshotInput = state.terminalCommandInput
+    viewModelScope.launch {
+      val completion =
+        runCatching {
+          terminalExecutor.tabComplete(snapshotInput, session, state.terminalDir)
+        }.getOrNull() ?: return@launch
+      val hintLines = completion.candidateLines.map { (text, kind) -> newTerminalLine(text, kind) }
+      _uiState.update { current ->
+        if (current.terminalCommandInput != snapshotInput) current
+        else {
+          current.copy(
+            terminalCommandInput = completion.updatedInput,
+            terminalLines =
+              if (hintLines.isEmpty()) current.terminalLines
+              else current.terminalLines + hintLines,
+          )
+        }
+      }
+    }
+  }
+
   fun navigateTerminalHistory(direction: Int) {
     val state = _uiState.value
     val history = state.terminalHistory
@@ -1597,8 +1655,8 @@ class GitFilesViewModel(application: Application) : AndroidViewModel(application
     val rawCommand = (commandOverride ?: state.terminalCommandInput).trim()
     if (rawCommand.isEmpty()) return
 
-    val promptPath = if (state.terminalDir.isEmpty()) "/" else "/${state.terminalDir}"
-    val commandEchoLine = newTerminalLine("$promptPath$ $rawCommand", TerminalLineKind.COMMAND)
+    val promptPath = if (state.terminalDir.isEmpty()) "~" else "~/${state.terminalDir}"
+    val commandEchoLine = newTerminalLine("$promptPath $ $rawCommand", TerminalLineKind.COMMAND)
     val updatedHistory =
       if (state.terminalHistory.lastOrNull() == rawCommand) state.terminalHistory
       else (state.terminalHistory + rawCommand).takeLast(50)
@@ -1613,55 +1671,67 @@ class GitFilesViewModel(application: Application) : AndroidViewModel(application
       )
     }
 
-    viewModelScope.launch {
-      try {
-        val activeToken = state.savedTokens.firstOrNull { it.token == session.token }
-        val result =
-          terminalExecutor.execute(
-            rawCommand = rawCommand,
-            session = session,
-            currentDir = state.terminalDir,
-            activeToken = activeToken,
-          )
+    activeTerminalJob?.cancel()
+    activeTerminalJob =
+      viewModelScope.launch {
+        try {
+          val activeToken = state.savedTokens.firstOrNull { it.token == session.token }
+          val result =
+            terminalExecutor.execute(
+              rawCommand = rawCommand,
+              session = session,
+              currentDir = state.terminalDir,
+              activeToken = activeToken,
+              commandHistory = updatedHistory,
+            )
 
-        if (result.exitTerminal) {
-          _uiState.update { it.copy(isRunningTerminalCommand = false) }
-          closeTerminal()
-          return@launch
-        }
+          if (result.exitTerminal) {
+            _uiState.update { it.copy(isRunningTerminalCommand = false) }
+            closeTerminal()
+            return@launch
+          }
 
-        if (result.didMutateRepo) {
-          terminalDidMutateRepo = true
-        }
+          if (result.didMutateRepo) {
+            terminalDidMutateRepo = true
+          }
 
-        val resolvedSession = result.updatedSession ?: session
-        terminalRepoOwnerKey = "${resolvedSession.fullName}@${resolvedSession.branch}"
+          val resolvedSession = result.updatedSession ?: session
+          terminalRepoOwnerKey = "${resolvedSession.fullName}@${resolvedSession.branch}"
 
-        val appendedLines = result.lines.map { (text, kind) -> newTerminalLine(text, kind) }
-        _uiState.update { current ->
-          val baseLines = if (result.clearScreen) emptyList() else current.terminalLines
-          current.copy(
-            session = resolvedSession,
-            terminalDir = result.newDir ?: current.terminalDir,
-            terminalLines = baseLines + appendedLines,
-            isRunningTerminalCommand = false,
-            terminalClipboardCopy = result.clipboardCopyText ?: current.terminalClipboardCopy,
-            statusMessage = if (result.clipboardCopyText != null) "Copied clone command" else current.statusMessage,
-          )
-        }
+          val appendedLines = result.lines.map { (text, kind) -> newTerminalLine(text, kind) }
+          _uiState.update { current ->
+            val baseLines = if (result.clearScreen) emptyList() else current.terminalLines
+            current.copy(
+              session = resolvedSession,
+              terminalDir = result.newDir ?: current.terminalDir,
+              terminalLines = baseLines + appendedLines,
+              isRunningTerminalCommand = false,
+              terminalClipboardCopy = result.clipboardCopyText ?: current.terminalClipboardCopy,
+              terminalLaunchTermuxCommand =
+                result.launchTermuxCommand ?: current.terminalLaunchTermuxCommand,
+              statusMessage =
+                when {
+                  result.launchTermuxCommand != null -> "Termux command copied"
+                  result.clipboardCopyText != null -> "Copied clone command"
+                  else -> current.statusMessage
+                },
+            )
+          }
 
-        result.openEditorEntry?.let { entry ->
-          openFile(entry)
-        }
-      } catch (e: Exception) {
-        val errLine = newTerminalLine(e.message ?: "Command failed", TerminalLineKind.ERROR)
-        _uiState.update {
-          it.copy(
-            terminalLines = it.terminalLines + errLine,
-            isRunningTerminalCommand = false,
-          )
+          result.openEditorEntry?.let { entry ->
+            openFile(entry)
+          }
+        } catch (_: kotlinx.coroutines.CancellationException) {
+          // Handled cleanly by interruptOrClearTerminalLine
+        } catch (e: Exception) {
+          val errLine = newTerminalLine(e.message ?: "Command failed", TerminalLineKind.ERROR)
+          _uiState.update {
+            it.copy(
+              terminalLines = it.terminalLines + errLine,
+              isRunningTerminalCommand = false,
+            )
+          }
         }
       }
-    }
   }
 }

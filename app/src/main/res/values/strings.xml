@@ -51,7 +51,9 @@
     <string name="action_open_terminal_here">Open Terminal here</string>
     <string name="terminal_clear">Clear</string>
     <string name="terminal_show_keyboard">Show keyboard</string>
-    <string name="terminal_hint">Type command (help, ls, cd, cat, mkdir, git log…)</string>
+    <string name="terminal_open_termux">Open in Termux</string>
+    <string name="terminal_toggle_cmds">Quick commands</string>
+    <string name="terminal_hint">Enter command (Tab to autocomplete, help for list)</string>
     <string name="action_run">Run</string>
     <string name="label_upload_batch_size">Files per commit batch</string>
     <string name="hint_upload_batch_size">1–200 (default 50)</string>

@@ -17,6 +17,7 @@ import com.example.data.model.FileDocument
 import com.example.data.model.GitHubErrorDto
 import com.example.data.model.GitTreeEntryDto
 import com.example.data.model.PutContentRequest
+import com.example.data.model.RepoCommitDetail
 import com.example.data.model.RepoCommitSummary
 import com.example.data.model.RepoEntry
 import com.example.data.model.RepoListResult
@@ -497,6 +498,74 @@ class GitHubRepository(private val safHelper: SafFileHelper) {
           dateIso = dto.commit.author?.date.orEmpty(),
         )
       }
+    }
+
+  suspend fun getCommitDetail(
+    session: RepoSession,
+    ref: String = session.branch,
+  ): RepoCommitDetail =
+    withContext(Dispatchers.IO) {
+      if (session.isEmptyRepo) {
+        throw IllegalStateException("Repository has no commits yet.")
+      }
+      val auth = authHeader(session.token)
+      val targetRef = ref.trim().ifEmpty { session.branch }
+      val dto =
+        safeApiCall {
+          api.getCommitDetail(
+            auth = auth,
+            owner = session.owner,
+            repo = session.repo,
+            encodedRef = encodeGitHubPath(targetRef),
+          )
+        }
+      RepoCommitDetail(
+        sha = dto.sha,
+        shortSha = dto.sha.take(7),
+        message = dto.commit.message,
+        authorName = dto.commit.author?.name.orEmpty(),
+        dateIso = dto.commit.author?.date.orEmpty(),
+        files = dto.files,
+      )
+    }
+
+  suspend fun copyFile(
+    session: RepoSession,
+    sourcePath: String,
+    destPath: String,
+    commitMessage: String,
+  ): RepoSession =
+    withContext(Dispatchers.IO) {
+      val cleanSrc = sourcePath.trim('/')
+      val cleanDst = destPath.trim('/')
+      if (cleanSrc.isEmpty() || cleanDst.isEmpty()) {
+        throw IllegalArgumentException("Source and destination paths are required")
+      }
+      if (cleanSrc == cleanDst) return@withContext session
+      val srcEntry = findEntryAtPath(session, cleanSrc)
+        ?: throw IllegalStateException("cp: not found: $cleanSrc")
+      if (srcEntry.type != EntryType.FILE) {
+        throw IllegalArgumentException("cp: '$cleanSrc' is a directory (only files supported)")
+      }
+      val auth = authHeader(session.token)
+      val snapshot = fetchCurrentTree(auth, session)
+      commitTreeAndMoveRef(
+        auth = auth,
+        session = session,
+        parentCommitSha = snapshot.headCommitSha,
+        baseTreeSha = snapshot.baseTreeSha,
+        entries =
+          listOf(
+            CreateTreeEntryRequest(
+              path = cleanDst,
+              mode = "100644",
+              type = "blob",
+              sha = srcEntry.sha,
+            )
+          ),
+        message = commitMessage.ifBlank { "Copy $cleanSrc to $cleanDst" },
+      )
+      refreshBranches(session)
     }
 
   suspend fun listRecursiveTree(session: RepoSession): Pair<List<RepoTreeItem>, Boolean> =

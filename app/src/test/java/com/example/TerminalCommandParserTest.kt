@@ -1,5 +1,7 @@
 package com.example
 
+import com.example.ui.ChainedCommandPart
+import com.example.ui.EchoRedirectCommand
 import com.example.ui.TerminalCommandParser
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -19,14 +21,40 @@ class TerminalCommandParserTest {
     assertEquals("app", TerminalCommandParser.resolveRepoPath("app/src", ".."))
     assertEquals("app/res", TerminalCommandParser.resolveRepoPath("app/src", "../res"))
     assertEquals("", TerminalCommandParser.resolveRepoPath("app/src", "/"))
+    assertEquals("", TerminalCommandParser.resolveRepoPath("app/src", "~"))
     assertEquals("docs/guide.md", TerminalCommandParser.resolveRepoPath("app/src", "/docs/guide.md"))
     assertEquals("app/src", TerminalCommandParser.resolveRepoPath("app/src", "."))
   }
 
   @Test
-  fun parseEchoRedirect_parsesContentAndTarget() {
-    val parsed = TerminalCommandParser.parseEchoRedirect("""echo "hello repo" > notes/readme.txt""")
-    assertEquals("hello repo" to "notes/readme.txt", parsed)
+  fun parseEchoRedirect_parsesOverwriteAndAppend() {
+    assertEquals(
+      EchoRedirectCommand("hello repo", "notes/readme.txt", append = false),
+      TerminalCommandParser.parseEchoRedirect("""echo "hello repo" > notes/readme.txt"""),
+    )
+    assertEquals(
+      EchoRedirectCommand("next line", "notes/readme.txt", append = true),
+      TerminalCommandParser.parseEchoRedirect("""echo "next line" >> notes/readme.txt"""),
+    )
     assertNull(TerminalCommandParser.parseEchoRedirect("echo hello only"))
+  }
+
+  @Test
+  fun splitChainedCommands_splitsOutsideQuotesOnly() {
+    val parts = TerminalCommandParser.splitChainedCommands("""cd Da && echo "a && b; c" > note.txt; ls -la""")
+    assertEquals(
+      listOf(
+        ChainedCommandPart("cd Da", stopOnFailure = false),
+        ChainedCommandPart("""echo "a && b; c" > note.txt""", stopOnFailure = true),
+        ChainedCommandPart("ls -la", stopOnFailure = false),
+      ),
+      parts,
+    )
+  }
+
+  @Test
+  fun longestCommonPrefix_computesSharedPrefix() {
+    assertEquals("git ", TerminalCommandParser.longestCommonPrefix(listOf("git log", "git show", "git status")))
+    assertEquals("", TerminalCommandParser.longestCommonPrefix(listOf("cat", "ls")))
   }
 }

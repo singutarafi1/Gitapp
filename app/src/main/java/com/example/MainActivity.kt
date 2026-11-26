@@ -207,10 +207,13 @@ fun GitFilesApp(viewModel: GitFilesViewModel = viewModel()) {
         uiState = uiState,
         onInputChange = viewModel::onTerminalInputChanged,
         onRunCommand = viewModel::runTerminalCommand,
+        onTabComplete = viewModel::tabCompleteTerminalInput,
+        onInterruptOrClear = viewModel::interruptOrClearTerminalLine,
         onClearOutput = viewModel::clearTerminalOutput,
         onHistoryUp = { viewModel.navigateTerminalHistory(-1) },
         onHistoryDown = { viewModel.navigateTerminalHistory(1) },
         onClearClipboardEvent = viewModel::clearTerminalClipboardEvent,
+        onClearLaunchTermuxEvent = viewModel::clearTerminalLaunchEvent,
         onClearStatus = viewModel::clearStatusMessage,
         onBack = viewModel::closeTerminal,
       )

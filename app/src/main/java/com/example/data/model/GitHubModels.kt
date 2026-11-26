@@ -278,6 +278,31 @@ data class RepoCommitSummary(
   val dateIso: String,
 )
 
+@JsonClass(generateAdapter = true)
+data class RepoCommitDetailResponseDto(
+  val sha: String,
+  val commit: RepoCommitDetailDto,
+  val files: List<RepoCommitFileDto> = emptyList(),
+)
+
+@JsonClass(generateAdapter = true)
+data class RepoCommitFileDto(
+  val filename: String,
+  val status: String = "",
+  val additions: Int = 0,
+  val deletions: Int = 0,
+  val patch: String? = null,
+)
+
+data class RepoCommitDetail(
+  val sha: String,
+  val shortSha: String,
+  val message: String,
+  val authorName: String,
+  val dateIso: String,
+  val files: List<RepoCommitFileDto>,
+)
+
 data class RepoTreeItem(
   val path: String,
   val type: String,

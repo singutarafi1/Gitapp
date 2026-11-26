@@ -18,6 +18,7 @@ import com.example.data.model.GitRefDto
 import com.example.data.model.GitTreeResponseDto
 import com.example.data.model.PutContentRequest
 import com.example.data.model.PutContentResponse
+import com.example.data.model.RepoCommitDetailResponseDto
 import com.example.data.model.RepoCommitListItemDto
 import com.example.data.model.UpdateRefRequest
 import com.example.data.model.UpdateRepoVisibilityRequest
@@ -226,4 +227,12 @@ interface GitHubApiService {
     @Query("path") path: String? = null,
     @Query("per_page") perPage: Int = 15,
   ): List<RepoCommitListItemDto>
+
+  @GET("repos/{owner}/{repo}/commits/{ref}")
+  suspend fun getCommitDetail(
+    @Header("Authorization") auth: String,
+    @Path("owner") owner: String,
+    @Path("repo") repo: String,
+    @Path("ref", encoded = true) encodedRef: String,
+  ): RepoCommitDetailResponseDto
 }
