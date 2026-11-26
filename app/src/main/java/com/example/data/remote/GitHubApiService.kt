@@ -141,7 +141,7 @@ interface GitHubApiService {
     @Path("repo") repo: String,
     @Path("path", encoded = true) encodedPath: String,
     @Body body: DeleteContentRequest,
-  )
+  ): Response<ResponseBody>
 
   @GET("repos/{owner}/{repo}/git/ref/heads/{branch}")
   suspend fun getBranchRef(
@@ -182,6 +182,14 @@ interface GitHubApiService {
     @Path("owner") owner: String,
     @Path("repo") repo: String,
     @Body body: CreateTreeRequest,
+  ): CreateTreeResponse
+
+  @POST("repos/{owner}/{repo}/git/trees")
+  suspend fun createTreeRaw(
+    @Header("Authorization") auth: String,
+    @Path("owner") owner: String,
+    @Path("repo") repo: String,
+    @Body body: RequestBody,
   ): CreateTreeResponse
 
   @POST("repos/{owner}/{repo}/git/commits")

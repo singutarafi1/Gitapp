@@ -50,6 +50,10 @@
     <string name="action_terminal">Terminal</string>
     <string name="action_open_terminal_here">Open Terminal here</string>
     <string name="terminal_clear">Clear</string>
+    <string name="terminal_show_keyboard">Show keyboard</string>
     <string name="terminal_hint">Type command (help, ls, cd, cat, mkdir, git log…)</string>
     <string name="action_run">Run</string>
+    <string name="label_upload_batch_size">Files per commit batch</string>
+    <string name="hint_upload_batch_size">1–200 (default 50)</string>
+    <string name="helper_upload_batch_size">Split large uploads into N files per commit (1–200). Max file size: 75 MB.</string>
 </resources>

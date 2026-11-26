@@ -2,7 +2,9 @@ package com.example.ui
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -12,6 +14,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
@@ -30,6 +33,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.Send
 import androidx.compose.material.icons.rounded.DeleteSweep
+import androidx.compose.material.icons.rounded.Keyboard
 import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.KeyboardArrowUp
 import androidx.compose.material.icons.rounded.Terminal
@@ -56,14 +60,20 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardCapitalization
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -79,6 +89,7 @@ import com.example.ui.theme.TerminalSuccess
 import com.example.ui.theme.TerminalSurface
 import com.example.ui.theme.TerminalText
 import com.example.ui.theme.TerminalWarning
+import kotlinx.coroutines.delay
 
 private data class QuickTerminalChip(
   val label: String,
@@ -122,6 +133,10 @@ fun RepoTerminalScreen(
   val listState = rememberLazyListState()
   val snackbarHostState = remember { SnackbarHostState() }
   val clipboardManager = LocalClipboardManager.current
+  val focusRequester = remember { FocusRequester() }
+  val keyboardController = LocalSoftwareKeyboardController.current
+  val inputInteractionSource = remember { MutableInteractionSource() }
+
   var commandFieldValue by remember {
     mutableStateOf(
       TextFieldValue(
@@ -129,6 +144,14 @@ fun RepoTerminalScreen(
         selection = TextRange(uiState.terminalCommandInput.length),
       )
     )
+  }
+
+  LaunchedEffect(Unit) {
+    delay(120L)
+    runCatching {
+      focusRequester.requestFocus()
+      keyboardController?.show()
+    }
   }
 
   LaunchedEffect(uiState.terminalCommandInput) {
@@ -166,6 +189,13 @@ fun RepoTerminalScreen(
   }
 
   val displayPath = if (uiState.terminalDir.isEmpty()) "/" else "/${uiState.terminalDir}"
+
+  val requestTerminalKeyboard: () -> Unit = {
+    runCatching {
+      focusRequester.requestFocus()
+      keyboardController?.show()
+    }
+  }
 
   Scaffold(
     containerColor = TerminalBackground,
@@ -221,6 +251,15 @@ fun RepoTerminalScreen(
           }
         },
         actions = {
+          IconButton(
+            onClick = requestTerminalKeyboard,
+            modifier = Modifier.testTag("terminal_keyboard_button"),
+          ) {
+            Icon(
+              imageVector = Icons.Rounded.Keyboard,
+              contentDescription = stringResource(R.string.terminal_show_keyboard),
+            )
+          }
           IconButton(
             onClick = onClearOutput,
             enabled = !uiState.isRunningTerminalCommand,
@@ -309,6 +348,7 @@ fun RepoTerminalScreen(
                   onRunCommand(chip.command)
                 } else {
                   onInputChange(chip.command)
+                  requestTerminalKeyboard()
                 }
               },
               enabled = !uiState.isRunningTerminalCommand,
@@ -324,7 +364,10 @@ fun RepoTerminalScreen(
           }
         }
         IconButton(
-          onClick = onHistoryUp,
+          onClick = {
+            onHistoryUp()
+            requestTerminalKeyboard()
+          },
           enabled = !uiState.isRunningTerminalCommand && uiState.terminalHistory.isNotEmpty(),
           modifier = Modifier.testTag("terminal_history_up"),
         ) {
@@ -335,7 +378,10 @@ fun RepoTerminalScreen(
           )
         }
         IconButton(
-          onClick = onHistoryDown,
+          onClick = {
+            onHistoryDown()
+            requestTerminalKeyboard()
+          },
           enabled = !uiState.isRunningTerminalCommand && uiState.terminalHistory.isNotEmpty(),
           modifier = Modifier.testTag("terminal_history_down"),
         ) {
@@ -364,41 +410,64 @@ fun RepoTerminalScreen(
             color = TerminalSuccess,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
+            modifier =
+              Modifier.clickable(
+                interactionSource = inputInteractionSource,
+                indication = null,
+              ) { requestTerminalKeyboard() },
           )
           Spacer(modifier = Modifier.width(8.dp))
-          Box(
+          BasicTextField(
+            value = commandFieldValue,
+            onValueChange = { updated ->
+              commandFieldValue = updated
+              if (updated.text != uiState.terminalCommandInput) {
+                onInputChange(updated.text)
+              }
+            },
+            enabled = !uiState.isRunningTerminalCommand,
+            singleLine = true,
+            textStyle = CodeTextStyle.copy(color = TerminalText),
+            cursorBrush = SolidColor(TerminalPrompt),
+            keyboardOptions =
+              KeyboardOptions(
+                capitalization = KeyboardCapitalization.None,
+                autoCorrectEnabled = false,
+                keyboardType = KeyboardType.Text,
+                imeAction = ImeAction.Send,
+              ),
+            keyboardActions = KeyboardActions(onSend = { onRunCommand(null) }),
             modifier =
               Modifier.weight(1f)
-                .background(TerminalBackground, RoundedCornerShape(8.dp))
-                .padding(horizontal = 10.dp, vertical = 10.dp),
-            contentAlignment = Alignment.CenterStart,
-          ) {
-            if (uiState.terminalCommandInput.isEmpty()) {
-              Text(
-                text = stringResource(R.string.terminal_hint),
-                style = CodeTextStyle,
-                color = TerminalMuted,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-              )
-            }
-            BasicTextField(
-              value = commandFieldValue,
-              onValueChange = { updated ->
-                commandFieldValue = updated
-                if (updated.text != uiState.terminalCommandInput) {
-                  onInputChange(updated.text)
+                .focusRequester(focusRequester)
+                .onFocusChanged { focusState ->
+                  if (focusState.isFocused) {
+                    keyboardController?.show()
+                  }
                 }
-              },
-              enabled = !uiState.isRunningTerminalCommand,
-              singleLine = true,
-              textStyle = CodeTextStyle.copy(color = TerminalText),
-              cursorBrush = SolidColor(TerminalPrompt),
-              keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
-              keyboardActions = KeyboardActions(onSend = { onRunCommand(null) }),
-              modifier = Modifier.fillMaxWidth().testTag("terminal_input"),
-            )
-          }
+                .testTag("terminal_input"),
+            decorationBox = { innerTextField ->
+              Box(
+                modifier =
+                  Modifier.fillMaxWidth()
+                    .heightIn(min = 48.dp)
+                    .background(TerminalBackground, RoundedCornerShape(8.dp))
+                    .padding(horizontal = 12.dp, vertical = 12.dp),
+                contentAlignment = Alignment.CenterStart,
+              ) {
+                if (commandFieldValue.text.isEmpty()) {
+                  Text(
+                    text = stringResource(R.string.terminal_hint),
+                    style = CodeTextStyle,
+                    color = TerminalMuted,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                  )
+                }
+                innerTextField()
+              }
+            },
+          )
           IconButton(
             onClick = { onRunCommand(null) },
             enabled = !uiState.isRunningTerminalCommand && uiState.terminalCommandInput.isNotBlank(),

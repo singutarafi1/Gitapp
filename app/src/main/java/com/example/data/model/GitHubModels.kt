@@ -283,3 +283,17 @@ data class RepoTreeItem(
   val type: String,
   val size: Long,
 )
+
+@JsonClass(generateAdapter = true)
+data class DeleteTreeRequest(
+  @Json(name = "base_tree") val baseTree: String,
+  val tree: List<DeleteTreeEntryRequest>,
+)
+
+@JsonClass(generateAdapter = true)
+data class DeleteTreeEntryRequest(
+  val path: String,
+  val mode: String,
+  val type: String,
+  val sha: String? = null,
+)

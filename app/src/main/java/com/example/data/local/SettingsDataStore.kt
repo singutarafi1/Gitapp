@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.squareup.moshi.JsonClass
@@ -28,6 +29,7 @@ data class SavedConnection(
   val repoUrl: String = "",
   val branch: String = "",
   val savedTokens: List<SavedToken> = emptyList(),
+  val uploadBatchSize: Int = SettingsDataStore.DEFAULT_UPLOAD_BATCH_SIZE,
 )
 
 fun maskToken(token: String): String {
@@ -49,6 +51,7 @@ class SettingsDataStore(private val context: Context) {
     val REPO_URL = stringPreferencesKey("repo_url")
     val BRANCH = stringPreferencesKey("branch")
     val SAVED_TOKENS = stringPreferencesKey("saved_tokens_json")
+    val UPLOAD_BATCH_SIZE = intPreferencesKey("upload_batch_size")
   }
 
   private val moshi = Moshi.Builder().build()
@@ -113,11 +116,13 @@ class SettingsDataStore(private val context: Context) {
         } else {
           storedTokens
         }
+      val batchSize = sanitizeUploadBatchSize(prefs[Keys.UPLOAD_BATCH_SIZE] ?: DEFAULT_UPLOAD_BATCH_SIZE)
       SavedConnection(
         token = activeToken,
         repoUrl = prefs[Keys.REPO_URL].orEmpty(),
         branch = prefs[Keys.BRANCH].orEmpty(),
         savedTokens = mergedTokens,
+        uploadBatchSize = batchSize,
       )
     }
 
@@ -205,11 +210,28 @@ class SettingsDataStore(private val context: Context) {
     }
   }
 
+  suspend fun saveUploadBatchSize(batchSize: Int): Int {
+    val clamped = sanitizeUploadBatchSize(batchSize)
+    context.dataStore.edit { prefs ->
+      prefs[Keys.UPLOAD_BATCH_SIZE] = clamped
+    }
+    return clamped
+  }
+
   suspend fun clearConnection() {
     context.dataStore.edit { prefs ->
       prefs.remove(Keys.TOKEN)
       prefs.remove(Keys.REPO_URL)
       prefs.remove(Keys.BRANCH)
     }
+  }
+
+  companion object {
+    const val DEFAULT_UPLOAD_BATCH_SIZE = 50
+    const val MIN_UPLOAD_BATCH_SIZE = 1
+    const val MAX_UPLOAD_BATCH_SIZE = 200
+
+    fun sanitizeUploadBatchSize(raw: Int): Int =
+      raw.coerceIn(MIN_UPLOAD_BATCH_SIZE, MAX_UPLOAD_BATCH_SIZE)
   }
 }

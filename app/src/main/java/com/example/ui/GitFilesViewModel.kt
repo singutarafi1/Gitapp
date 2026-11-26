@@ -89,6 +89,7 @@ data class GitFilesUiState(
   val terminalHistoryCursor: Int = -1,
   val isRunningTerminalCommand: Boolean = false,
   val terminalClipboardCopy: String? = null,
+  val uploadBatchSizeInput: String = SettingsDataStore.DEFAULT_UPLOAD_BATCH_SIZE.toString(),
 )
 
 class GitFilesViewModel(application: Application) : AndroidViewModel(application) {
@@ -200,6 +201,7 @@ class GitFilesViewModel(application: Application) : AndroidViewModel(application
           repoUrlInput = saved.repoUrl,
           branchInput = saved.branch,
           savedTokens = saved.savedTokens,
+          uploadBatchSizeInput = saved.uploadBatchSize.toString(),
         )
       }
       if (saved.token.isNotBlank() && saved.repoUrl.isNotBlank()) {
@@ -218,6 +220,38 @@ class GitFilesViewModel(application: Application) : AndroidViewModel(application
 
   fun onBranchInputChanged(value: String) {
     _uiState.update { it.copy(branchInput = value, connectionError = null) }
+  }
+
+  fun onUploadBatchSizeChanged(rawValue: String) {
+    val digitsOnly = rawValue.filter { it.isDigit() }.take(3)
+    val parsed = digitsOnly.toIntOrNull()
+    val clampedText =
+      if (parsed != null && parsed > SettingsDataStore.MAX_UPLOAD_BATCH_SIZE) {
+        SettingsDataStore.MAX_UPLOAD_BATCH_SIZE.toString()
+      } else {
+        digitsOnly
+      }
+    _uiState.update { it.copy(uploadBatchSizeInput = clampedText) }
+    val validValue = clampedText.toIntOrNull()
+    if (validValue != null && validValue >= SettingsDataStore.MIN_UPLOAD_BATCH_SIZE) {
+      viewModelScope.launch {
+        settingsStore.saveUploadBatchSize(validValue)
+      }
+    }
+  }
+
+  fun selectUploadBatchSizePreset(batchSize: Int) {
+    val clamped = SettingsDataStore.sanitizeUploadBatchSize(batchSize)
+    _uiState.update { it.copy(uploadBatchSizeInput = clamped.toString()) }
+    viewModelScope.launch {
+      settingsStore.saveUploadBatchSize(clamped)
+    }
+  }
+
+  private fun currentUploadBatchSize(): Int {
+    val parsed = _uiState.value.uploadBatchSizeInput.toIntOrNull()
+      ?: SettingsDataStore.DEFAULT_UPLOAD_BATCH_SIZE
+    return SettingsDataStore.sanitizeUploadBatchSize(parsed)
   }
 
   fun clearStatusMessage() {
@@ -244,7 +278,11 @@ class GitFilesViewModel(application: Application) : AndroidViewModel(application
       lastFailedTransferRetry = null
       settingsStore.clearConnection()
       val keptTokens = _uiState.value.savedTokens
-      _uiState.value = GitFilesUiState(savedTokens = keptTokens)
+      val keptBatchSize = _uiState.value.uploadBatchSizeInput
+      _uiState.value = GitFilesUiState(
+        savedTokens = keptTokens,
+        uploadBatchSizeInput = keptBatchSize,
+      )
     }
   }
 
@@ -964,6 +1002,7 @@ class GitFilesViewModel(application: Application) : AndroidViewModel(application
         val tickerJob = startElapsedTicker(startedAtMs)
         try {
           val picked = uris.map { safHelper.readPickedFile(it) }
+          val batchSize = currentUploadBatchSize()
           val updatedSession =
             repository.uploadFiles(
               session = session,
@@ -972,6 +1011,7 @@ class GitFilesViewModel(application: Application) : AndroidViewModel(application
               existingEntriesInDir = state.entries,
               commitMessage =
                 if (picked.size == 1) "Upload ${picked.first().name}" else "Upload ${picked.size} files",
+              commitBatchSize = batchSize,
             ) { update ->
               publishTransferUpdate(
                 title = title,
@@ -1206,6 +1246,7 @@ class GitFilesViewModel(application: Application) : AndroidViewModel(application
         }
         val tickerJob = startElapsedTicker(startedAtMs)
         try {
+          val batchSize = currentUploadBatchSize()
           val updatedSession =
             repository.uploadOrReplaceFolder(
               session = session,
@@ -1213,6 +1254,7 @@ class GitFilesViewModel(application: Application) : AndroidViewModel(application
               replaceExistingFolder = replaceExisting,
               localFiles = selection.files,
               commitMessage = commitMessage,
+              commitBatchSize = batchSize,
             ) { update ->
               publishTransferUpdate(
                 title = title,

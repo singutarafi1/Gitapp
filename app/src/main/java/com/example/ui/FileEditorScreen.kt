@@ -180,6 +180,9 @@ fun FileEditorScreen(
     },
   ) { innerPadding ->
     Column(modifier = Modifier.fillMaxSize().padding(innerPadding).imePadding()) {
+      if (uiState.transferProgress != null) {
+        androidx.compose.material3.LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+      }
       if (uiState.browserError != null) {
         Surface(
           color = MaterialTheme.colorScheme.errorContainer,

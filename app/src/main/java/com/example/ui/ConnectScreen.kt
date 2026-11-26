@@ -93,6 +93,8 @@ fun ConnectScreen(
   onTokenChange: (String) -> Unit,
   onRepoUrlChange: (String) -> Unit,
   onBranchChange: (String) -> Unit,
+  onUploadBatchSizeChange: (String) -> Unit,
+  onSelectUploadBatchSizePreset: (Int) -> Unit,
   onConnect: () -> Unit,
   onOpenRepoPicker: () -> Unit,
   onDismissRepoPicker: () -> Unit,
@@ -315,6 +317,48 @@ fun ConnectScreen(
           keyboardActions = KeyboardActions(onDone = { if (!uiState.isConnecting) onConnect() }),
           modifier = Modifier.fillMaxWidth().testTag("branch_input"),
         )
+
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+          OutlinedTextField(
+            value = uiState.uploadBatchSizeInput,
+            onValueChange = onUploadBatchSizeChange,
+            label = { Text(stringResource(R.string.label_upload_batch_size)) },
+            placeholder = { Text(stringResource(R.string.hint_upload_batch_size)) },
+            supportingText = { Text(stringResource(R.string.helper_upload_batch_size)) },
+            singleLine = true,
+            textStyle = CodeTextStyle,
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Done),
+            modifier = Modifier.fillMaxWidth().testTag("upload_batch_size_input"),
+          )
+          val selectedBatch = uiState.uploadBatchSizeInput.toIntOrNull()
+          Row(
+            modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+          ) {
+            listOf(10, 25, 50, 100, 150, 200).forEach { preset ->
+              val isSelected = selectedBatch == preset
+              FilterChip(
+                selected = isSelected,
+                onClick = { onSelectUploadBatchSizePreset(preset) },
+                label = { Text("$preset", style = CodeTextStyle) },
+                leadingIcon =
+                  if (isSelected) {
+                    {
+                      Icon(
+                        imageVector = Icons.Rounded.Check,
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp),
+                      )
+                    }
+                  } else {
+                    null
+                  },
+                modifier = Modifier.testTag("batch_preset_chip_$preset"),
+              )
+            }
+          }
+        }
 
         if (uiState.connectionError != null) {
           Surface(

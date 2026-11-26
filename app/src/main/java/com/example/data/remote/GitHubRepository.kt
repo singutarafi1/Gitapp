@@ -10,6 +10,8 @@ import com.example.data.model.CreateRepoRequest
 import com.example.data.model.CreateTreeEntryRequest
 import com.example.data.model.CreateTreeRequest
 import com.example.data.model.DeleteContentRequest
+import com.example.data.model.DeleteTreeEntryRequest
+import com.example.data.model.DeleteTreeRequest
 import com.example.data.model.EntryType
 import com.example.data.model.FileDocument
 import com.example.data.model.GitHubErrorDto
@@ -43,7 +45,9 @@ import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import okhttp3.Interceptor
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
+import okhttp3.RequestBody.Companion.toRequestBody
 import okio.ByteString.Companion.toByteString
 import retrofit2.HttpException
 import retrofit2.Retrofit
@@ -53,6 +57,7 @@ class GitHubRepository(private val safHelper: SafFileHelper) {
 
   private val moshi: Moshi = Moshi.Builder().build()
   private val errorAdapter = moshi.adapter(GitHubErrorDto::class.java)
+  private val deleteTreeAdapter = moshi.adapter(DeleteTreeRequest::class.java).serializeNulls()
 
   private val api: GitHubApiService by lazy {
     val headerInterceptor = Interceptor { chain ->
@@ -658,6 +663,7 @@ class GitHubRepository(private val safHelper: SafFileHelper) {
     pickedFiles: List<LocalPickedFile>,
     existingEntriesInDir: List<RepoEntry>,
     commitMessage: String,
+    commitBatchSize: Int = UPLOAD_COMMIT_BATCH_SIZE,
     onProgress: (TransferProgressUpdate) -> Unit,
   ): RepoSession =
     withContext(Dispatchers.IO) {
@@ -757,12 +763,13 @@ class GitHubRepository(private val safHelper: SafFileHelper) {
           .toMutableMap()
       val currentBlobShas = currentPathToSha.values.toMutableSet()
 
+      val safeBatchSize = commitBatchSize.coerceIn(1, 200)
       val baseOffset = pickedFiles.size - remainingFiles.size
-      val batches = remainingFiles.chunked(UPLOAD_COMMIT_BATCH_SIZE)
+      val batches = remainingFiles.chunked(safeBatchSize)
       val baseMessage = commitMessage.ifBlank { "Upload ${pickedFiles.size} files" }
 
       batches.forEachIndexed { batchIndex, batch ->
-        val offset = baseOffset + batchIndex * UPLOAD_COMMIT_BATCH_SIZE
+        val offset = baseOffset + batchIndex * safeBatchSize
         val builtItems =
           buildTreeEntriesForFiles(
             auth = auth,
@@ -811,6 +818,7 @@ class GitHubRepository(private val safHelper: SafFileHelper) {
     replaceExistingFolder: Boolean,
     localFiles: List<LocalFolderFile>,
     commitMessage: String,
+    commitBatchSize: Int = UPLOAD_COMMIT_BATCH_SIZE,
     onProgress: (TransferProgressUpdate) -> Unit,
   ): RepoSession =
     withContext(Dispatchers.IO) {
@@ -871,8 +879,9 @@ class GitHubRepository(private val safHelper: SafFileHelper) {
           .toMutableMap()
       val currentBlobShas = currentPathToSha.values.toMutableSet()
 
+      val safeBatchSize = commitBatchSize.coerceIn(1, 200)
       val baseOffset = localFiles.size - remainingFiles.size
-      val batches = remainingFiles.chunked(UPLOAD_COMMIT_BATCH_SIZE)
+      val batches = remainingFiles.chunked(safeBatchSize)
       val baseMessage =
         commitMessage.ifBlank {
           if (replaceExistingFolder) "Replace folder ${cleanTarget.ifEmpty { "root" }}"
@@ -880,7 +889,7 @@ class GitHubRepository(private val safHelper: SafFileHelper) {
         }
 
       batches.forEachIndexed { batchIndex, batch ->
-        val offset = baseOffset + batchIndex * UPLOAD_COMMIT_BATCH_SIZE
+        val offset = baseOffset + batchIndex * safeBatchSize
         val builtItems =
           buildTreeEntriesForFiles(
             auth = auth,
@@ -1216,68 +1225,226 @@ class GitHubRepository(private val safHelper: SafFileHelper) {
     withContext(Dispatchers.IO) {
       val auth = authHeader(session.token)
       if (entry.type == EntryType.FILE) {
-        safeApiCall {
-          api.deleteFileContent(
+        val message = commitMessage.ifBlank { "Delete ${entry.name}" }
+        deleteSingleFileWithRefresh(
+          auth = auth,
+          session = session,
+          path = entry.path,
+          knownSha = entry.sha,
+          message = message,
+        )
+        return@withContext refreshBranches(session)
+      }
+
+      val cleanFolder = entry.path.trim('/')
+      if (cleanFolder.isEmpty()) {
+        throw IllegalArgumentException("Cannot delete repository root")
+      }
+      val message = commitMessage.ifBlank { "Delete folder ${entry.name}" }
+      val prefix = "$cleanFolder/"
+      val snapshot = fetchCurrentTree(auth, session)
+
+      val targetItems: List<DeleteTreeEntryRequest>
+      val hasOtherFiles: Boolean
+
+      if (!snapshot.truncated) {
+        val nonTreeEntries = snapshot.entries.filter { it.type != "tree" }
+        val matched =
+          nonTreeEntries.filter { it.path == cleanFolder || it.path.startsWith(prefix) }
+        targetItems =
+          matched.map {
+            DeleteTreeEntryRequest(
+              path = it.path,
+              mode = it.mode,
+              type = it.type,
+              sha = null,
+            )
+          }
+        hasOtherFiles =
+          nonTreeEntries.any { it.path != cleanFolder && !it.path.startsWith(prefix) }
+      } else {
+        val collectedFiles = collectFilesUnderFolderViaContentsApi(session, cleanFolder)
+        targetItems =
+          collectedFiles.map { fileEntry ->
+            DeleteTreeEntryRequest(
+              path = fileEntry.path,
+              mode = "100644",
+              type = "blob",
+              sha = null,
+            )
+          }
+        hasOtherFiles = hasFilesOutsideFolder(session, cleanFolder)
+      }
+
+      if (targetItems.isEmpty()) {
+        return@withContext refreshBranches(session)
+      }
+
+      if (!hasOtherFiles) {
+        // Removing all files from branch: delete sequentially via Contents API so branch clears cleanly
+        for (item in targetItems) {
+          val sha =
+            snapshot.entries.firstOrNull { it.path == item.path }?.sha.orEmpty()
+          deleteSingleFileWithRefresh(
             auth = auth,
-            owner = session.owner,
-            repo = session.repo,
-            encodedPath = encodeGitHubPath(entry.path),
-            body =
-              DeleteContentRequest(
-                message = commitMessage.ifBlank { "Delete ${entry.name}" },
-                sha = entry.sha,
-                branch = session.branch,
-              ),
+            session = session,
+            path = item.path,
+            knownSha = sha,
+            message = message,
           )
         }
         return@withContext refreshBranches(session)
       }
 
-      // Directory delete via atomic tree commit (or sequential delete if it clears the entire repo)
-      val (headCommitSha, _, existingTreeEntries, truncated) = fetchCurrentTree(auth, session)
-      if (truncated) {
-        throw IllegalStateException("Repository tree is too large for recursive folder delete")
-      }
-
-      val prefix = "${entry.path.trim('/')}/"
-      val nonTreeEntries = existingTreeEntries.filter { it.type != "tree" }
-      val targetEntries = nonTreeEntries.filter { it.path == entry.path || it.path.startsWith(prefix) }
-      val keptEntries =
-        nonTreeEntries
-          .filter { it.path != entry.path && !it.path.startsWith(prefix) }
-          .map { CreateTreeEntryRequest(it.path, it.mode, it.type, it.sha) }
-
-      if (keptEntries.isEmpty()) {
-        // Removing all files from branch: delete sequentially via Contents API so branch clears cleanly
-        for (item in targetEntries) {
+      // Delete folder files atomically using base_tree + sha=null so unrelated files
+      // (including .github/workflows) are never re-submitted or touched.
+      var currentParentCommitSha = snapshot.headCommitSha
+      var currentBaseTreeSha = snapshot.baseTreeSha
+      val chunks = targetItems.chunked(DELETE_TREE_BATCH_SIZE)
+      chunks.forEachIndexed { index, chunk ->
+        val chunkMessage =
+          if (chunks.size == 1) message else "$message (${index + 1}/${chunks.size})"
+        val json = deleteTreeAdapter.toJson(DeleteTreeRequest(baseTree = currentBaseTreeSha, tree = chunk))
+        val body = json.toRequestBody("application/json; charset=utf-8".toMediaType())
+        val createdTree =
           safeApiCall {
-            api.deleteFileContent(
-              auth = auth,
-              owner = session.owner,
-              repo = session.repo,
-              encodedPath = encodeGitHubPath(item.path),
-              body =
-                DeleteContentRequest(
-                  message = commitMessage.ifBlank { "Delete folder ${entry.name}" },
-                  sha = item.sha,
-                  branch = session.branch,
-                ),
+            api.createTreeRaw(auth, session.owner, session.repo, body)
+          }
+        val createdCommit =
+          safeApiCall {
+            api.createCommit(
+              auth,
+              session.owner,
+              session.repo,
+              CreateCommitRequest(
+                message = chunkMessage,
+                tree = createdTree.sha,
+                parents = listOf(currentParentCommitSha),
+              ),
             )
           }
+        safeApiCall {
+          api.updateBranchRef(
+            auth,
+            session.owner,
+            session.repo,
+            encodeGitHubPath(session.branch),
+            UpdateRefRequest(sha = createdCommit.sha),
+          )
         }
-        return@withContext refreshBranches(session)
+        currentParentCommitSha = createdCommit.sha
+        currentBaseTreeSha = createdTree.sha
       }
-
-      commitTreeAndMoveRef(
-        auth = auth,
-        session = session,
-        parentCommitSha = headCommitSha,
-        baseTreeSha = null,
-        entries = keptEntries,
-        message = commitMessage.ifBlank { "Delete folder ${entry.name}" },
-      )
-      session
+      refreshBranches(session)
     }
+
+  private suspend fun deleteSingleFileWithRefresh(
+    auth: String,
+    session: RepoSession,
+    path: String,
+    knownSha: String,
+    message: String,
+  ) {
+    val cleanPath = path.trim('/')
+    val encodedPath = encodeGitHubPath(cleanPath)
+    var activeSha = knownSha.trim()
+    if (activeSha.isEmpty()) {
+      activeSha =
+        safeApiCall {
+          api.getFileContent(auth, session.owner, session.repo, encodedPath, session.branch).sha
+        }
+    }
+
+    try {
+      safeApiCall {
+        val resp =
+          api.deleteFileContent(
+            auth = auth,
+            owner = session.owner,
+            repo = session.repo,
+            encodedPath = encodedPath,
+            body =
+              DeleteContentRequest(
+                message = message,
+                sha = activeSha,
+                branch = session.branch,
+              ),
+          )
+        resp.body()?.use { }
+        if (!resp.isSuccessful) {
+          throw HttpException(resp)
+        }
+      }
+    } catch (e: IllegalStateException) {
+      val httpCode = (e.cause as? HttpException)?.code()
+      if (httpCode != 409 && httpCode != 422) {
+        throw e
+      }
+      val latestSha =
+        safeApiCall {
+          api.getFileContent(auth, session.owner, session.repo, encodedPath, session.branch).sha
+        }
+      if (latestSha == activeSha || latestSha.isBlank()) {
+        throw e
+      }
+      safeApiCall {
+        val retryResp =
+          api.deleteFileContent(
+            auth = auth,
+            owner = session.owner,
+            repo = session.repo,
+            encodedPath = encodedPath,
+            body =
+              DeleteContentRequest(
+                message = message,
+                sha = latestSha,
+                branch = session.branch,
+              ),
+          )
+        retryResp.body()?.use { }
+        if (!retryResp.isSuccessful) {
+          throw HttpException(retryResp)
+        }
+      }
+    }
+  }
+
+  private suspend fun collectFilesUnderFolderViaContentsApi(
+    session: RepoSession,
+    folderPath: String,
+  ): List<RepoEntry> {
+    val result = mutableListOf<RepoEntry>()
+    val queue = ArrayDeque<String>()
+    queue.addLast(folderPath.trim('/'))
+    while (queue.isNotEmpty()) {
+      val dir = queue.removeFirst()
+      val entries = listDirectory(session, dir)
+      for (item in entries) {
+        if (item.type == EntryType.DIR) {
+          queue.addLast(item.path)
+        } else {
+          result += item
+        }
+      }
+    }
+    return result
+  }
+
+  private suspend fun hasFilesOutsideFolder(
+    session: RepoSession,
+    folderPath: String,
+  ): Boolean {
+    val segments = folderPath.trim('/').split('/').filter { it.isNotEmpty() }
+    var currentParent = ""
+    for (segment in segments) {
+      val siblings = listDirectory(session, currentParent)
+      if (siblings.any { it.name != segment }) {
+        return true
+      }
+      currentParent = if (currentParent.isEmpty()) segment else "$currentParent/$segment"
+    }
+    return false
+  }
 
   suspend fun downloadFile(
     session: RepoSession,
@@ -1624,6 +1791,7 @@ class GitHubRepository(private val safHelper: SafFileHelper) {
 
   private companion object {
     const val UPLOAD_COMMIT_BATCH_SIZE = 50
+    const val DELETE_TREE_BATCH_SIZE = 500
     const val LARGE_SINGLE_FILE_THRESHOLD_BYTES = 1_000_000
     const val MAX_SINGLE_BLOB_BYTES = 75_000_000
   }
