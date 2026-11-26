@@ -150,23 +150,41 @@ class GitHubRepository(private val safHelper: SafFileHelper) {
     }
   }
 
-  private suspend fun <T> safeApiCall(block: suspend () -> T): T {
+  private suspend fun <T> safeApiCall(
+    retryTransientAuth: Boolean = true,
+    block: suspend () -> T,
+  ): T {
     val maxAttempts = 4
     var attempt = 0
+    var authRetries = 0
     while (true) {
       try {
         return block()
       } catch (e: HttpException) {
+        val code = e.code()
         val apiMessage = extractApiMessage(e)
         val isRateLimit =
-          e.code() == 429 ||
-            (e.code() == 403 && apiMessage?.contains("rate limit", ignoreCase = true) == true)
+          code == 429 ||
+            (code == 403 && apiMessage?.contains("rate limit", ignoreCase = true) == true)
+        val isTransientServerError = code in setOf(500, 502, 503, 504)
+        val isTransientAuthError = retryTransientAuth && code == 401 && authRetries < 2
+
         if (isRateLimit && attempt < maxAttempts - 1) {
           val retryAfterSec =
             e.response()?.headers()?.get("Retry-After")?.toLongOrNull()?.coerceIn(1L, 60L)
               ?: ((attempt + 1) * 5L)
           delay(retryAfterSec * 1000L)
           attempt++
+          continue
+        }
+        if (isTransientServerError && attempt < maxAttempts - 1) {
+          delay(((attempt + 1) * 2L) * 1000L)
+          attempt++
+          continue
+        }
+        if (isTransientAuthError) {
+          authRetries++
+          delay(1500L * authRetries)
           continue
         }
         throw IllegalStateException(parseHttpError(e, apiMessage), e)
@@ -201,7 +219,7 @@ class GitHubRepository(private val safHelper: SafFileHelper) {
 
       val allDtos = mutableListOf<com.example.data.model.GitHubRepoDto>()
       for (page in 1..5) {
-        val batch = safeApiCall { api.listUserRepos(auth, page = page) }
+        val batch = safeApiCall(retryTransientAuth = false) { api.listUserRepos(auth, page = page) }
         allDtos.addAll(batch)
         if (batch.size < 100) break
       }
@@ -1019,8 +1037,8 @@ class GitHubRepository(private val safHelper: SafFileHelper) {
     tracker: TransferMetricsTracker,
     onProgress: (TransferProgressUpdate) -> Unit,
   ): List<BuiltTreeItem> = coroutineScope {
-    val fileReadSemaphore = Semaphore(8)
-    val blobUploadSemaphore = Semaphore(6)
+    val fileReadSemaphore = Semaphore(6)
+    val blobUploadSemaphore = Semaphore(4)
     val completedCount = AtomicInteger(progressOffset)
     val inlineBytesUsed = AtomicLong(0L)
     val maxInlineFileBytes = 64_000
